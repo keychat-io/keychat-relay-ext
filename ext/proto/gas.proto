@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+// gas subscribe Services
+package gas;
+
+service Subscription {
+  rpc Events(EventsRequest) returns (stream EventInfos) {}
+}
+
+message EventsRequest {
+  string client = 1;
+  optional string auth = 2;
+}
+
+message EventInfos { repeated EventInfo items = 1; }
+
+message EventInfo {
+  string id = 1;
+  repeated string to = 2;
+}

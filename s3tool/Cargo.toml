@@ -1,0 +1,35 @@
+[package]
+name = "s3tool"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "s3tool"
+path = "src/s3tool.rs"
+
+[dependencies]
+reqwest = {version = "0.11.20", features = ["serde_json", "json", "rustls-tls", "gzip"], default-features = false}
+# aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
+# aws-sdk-s3 = "1.36.0"
+dotenvy.workspace = true
+rust-s3.workspace = true
+aws-creds.workspace = true
+http.workspace = true
+base64-simd.workspace = true
+url.workspace = true
+ring = "0.17.8"
+chrono = "0.4"
+#
+# cashu-wallet.workspace = true
+flume.workspace = true
+futures.workspace = true
+tokio.workspace = true
+#
+anyhow.workspace = true
+clap.workspace = true
+# faster-hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true

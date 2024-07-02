@@ -1,0 +1,13 @@
+/target
+**.red
+**.redb
+**.db
+**.sqlite
+**.sqlite3
+**.env
+s3tool/x.*
+**.json
+
+
+
+

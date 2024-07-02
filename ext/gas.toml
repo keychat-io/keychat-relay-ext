@@ -1,0 +1,37 @@
+# Enable pay to relay
+enabled = true
+
+# listen = "0.0.0.0:2002"
+listen = "0.0.0.0:2001"
+
+# remote_ip_header = "x-forwarded-for"
+
+allow_pending = false
+allow_free = false
+
+database = "relay.red"
+timeout_ms = 3000
+
+[fee]
+unit="sat"
+maxsize=104857600
+mints = [
+  "https://8333.space:3338",
+]
+
+# cost_per_event = 1
+# 10m
+[[fee.prices]]
+min=0
+max=10485760
+price=1
+
+[[fee.prices]]
+min=10485760
+max=104857600
+price=2
+
+[limits.cashu_failed]
+secs=600
+allow=3
+
