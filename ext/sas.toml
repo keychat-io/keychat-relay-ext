@@ -19,6 +19,8 @@ maxsize=104857600
 mints = [
   "https://8333.space:3338",
 ]
+# for api /v1/info
+expired = "14 Days"
 
 # cost_per_event = 1
 # 10m

@@ -123,6 +123,8 @@ pub struct Fee {
     pub mints: Vec<cashu_wallet::Url>,
     pub maxsize: u64,
     pub prices: Vec<Price>,
+    #[serde(default)]
+    pub expired: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
