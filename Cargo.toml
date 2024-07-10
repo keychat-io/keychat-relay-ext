@@ -5,7 +5,7 @@ members = ["ext", "s3tool"]
 
 [workspace.dependencies]
 # cashu-wallet = {path = "../cashu-wallet-rs/cashu-wallet"}
-cashu-wallet = {git = "https://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@github.com/keychat-io/cashu-wallet-rs.git", tag = "240628"}
+cashu-wallet = {git = "https://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@github.com/keychat-io/cashu-wallet-rs.git", tag = "240710"}
 #
 flume = "0.11"
 futures = "0.3"

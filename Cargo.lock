@@ -379,7 +379,7 @@ checksum = "514de17de45fdb8dc022b1a7975556c53c86f9f0aa5f534b98977b171857c2c9"
 [[package]]
 name = "cashu-wallet"
 version = "0.2.0"
-source = "git+https://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@github.com/keychat-io/cashu-wallet-rs.git?tag=240628#d3f9bbda2f17d3c1bc6bcd7de9059f43467a4737"
+source = "git+https://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@github.com/keychat-io/cashu-wallet-rs.git?tag=240710#90dd87dfba47a0c0697619097b2f06bc5e901595"
 dependencies = [
  "anyhow",
  "async-trait",

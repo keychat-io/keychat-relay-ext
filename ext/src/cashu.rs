@@ -26,7 +26,9 @@ pub async fn crate_cashu_wallet(conf: &Config, _add_mints: bool) -> Result<UniWa
     let http = HttpOptions::new()
         .connection_verbose(true)
         .timeout_connect_ms(2000)
-        .timeout_swap_ms(conf.timeout_ms);
+        .timeout_get_ms(conf.timeout_ms)
+        .timeout_swap_ms(conf.timeout_ms)
+        .connection_verbose(true);
 
     let wallet = UnitedWallet::new(store, http);
     if _add_mints {
