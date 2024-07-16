@@ -64,7 +64,7 @@ pub async fn receive_tokens<State>(
     state: State,
 ) -> Result<Option<()>, UniError<<State::Store as UnitedStore>::Error>>
 where
-    State: StateTrait,
+    State: StateTrait + Send + 'static,
     UniError<<State::Store as UnitedStore>::Error>: UniErrorFrom<State::Store>,
 {
     let tokens: cashu_wallet::wallet::Token = cashu
@@ -92,38 +92,45 @@ where
         return Err(format_err!("unsupport mint url").into());
     }
 
-    if state.as_limits().cashu_failed_check(ip, &conf.limits) {
-        return Ok(None);
-    }
+    // if state.as_limits().cashu_failed_check(ip, &conf.limits) {
+    //     return Ok(None);
+    // }
 
     let start = std::time::Instant::now();
-    let res = state.as_wallet().receive_tokens(cashu).await;
-    let costms = start.elapsed().as_millis();
-    state
-        .as_metrics()
-        .0
-        .send(crate::Metric {
-            costms: costms as _,
-            amount: res.as_ref().map(|a| *a as u32).unwrap_or(0),
-        })
-        .unwrap();
+    let eventid = eventid.to_owned();
+    let ip = ip.to_owned();
+    let cashu = cashu.to_owned();
+    let fut = async move {
+        let res = state.as_wallet().receive_tokens(&cashu).await;
+        let costms = start.elapsed().as_millis();
+        state
+            .as_metrics()
+            .0
+            .send(crate::Metric {
+                costms: costms as _,
+                amount: res.as_ref().map(|a| *a as u32).unwrap_or(0),
+            })
+            .unwrap();
 
-    match res {
-        Ok(a) if a >= amount => {
-            info!(
-                "{}'s {:?} tokens receive {} {}ms ok: {}",
-                eventid, ip, price, costms, a,
-            );
+        match res {
+            Ok(a) if a >= amount => {
+                info!(
+                    "{}'s {:?} tokens receive {} {}ms ok: {}",
+                    eventid, ip, price, costms, a,
+                );
+            }
+            res => {
+                // state.as_limits().cashu_failed_count(ip, &conf.limits);
+                error!(
+                    "{}'s {:?} tokens receive {} {}ms failed: {:?}",
+                    eventid, ip, price, costms, res
+                );
+                // return res.and_then(|a| Err(format_err!("tokens amount {}<{}", a, price).into()));
+            }
         }
-        res => {
-            state.as_limits().cashu_failed_count(ip, &conf.limits);
-            error!(
-                "{}'s {:?} tokens receive {} {}ms failed: {:?}",
-                eventid, ip, price, costms, res
-            );
-            return res.and_then(|a| Err(format_err!("tokens amount {}<{}", a, price).into()));
-        }
-    }
+    };
+
+    tokio::spawn(fut);
 
     Ok(Some(()))
 }

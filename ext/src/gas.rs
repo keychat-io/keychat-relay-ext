@@ -177,7 +177,8 @@ impl Authorization for Handler {
 
                 let price = config.cost_per_event();
                 let res =
-                    cashu::receive_tokens(cashu, &id_prefix, source_ip, price, &self.state).await;
+                    cashu::receive_tokens(cashu, &id_prefix, source_ip, price, self.state.clone())
+                        .await;
 
                 match res {
                     Ok(None) => {

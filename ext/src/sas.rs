@@ -182,7 +182,7 @@ async fn create_object(
         }
 
         if price > 0 && !js.cashu.is_empty() {
-            let res = cashu::receive_tokens(&js.cashu, &ip, &js.sha256, price, &state).await;
+            let res = cashu::receive_tokens(&js.cashu, &ip, &js.sha256, price, state.clone()).await;
             match res {
                 Ok(None) => {
                     info!("{} {} cashu receive tokens limited: {:?}", sa, key, ip,);
