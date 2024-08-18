@@ -57,11 +57,19 @@ impl Opts {
             }
         }
 
+        if c.mints_file.is_none() {
+            let mut p = PathBuf::from(&c.database);
+            p.pop();
+            p.push("mints.txt");
+            info!("mints.txt: {}", p.display());
+            c.mints_file = Some(p);
+        }
+
         Ok(c)
     }
 }
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -78,8 +86,13 @@ pub struct Config {
     pub kinds: Option<Vec<u64>>,
     pub fee: Fee,
     pub limits: Limits,
+    #[serde(default)]
+    pub mints_file: Option<PathBuf>,
 }
 impl Config {
+    pub fn mints_file(&self) -> &PathBuf {
+        self.mints_file.as_ref().unwrap()
+    }
     pub fn mints(&self) -> &[cashu_wallet::Url] {
         &self.fee.mints
     }

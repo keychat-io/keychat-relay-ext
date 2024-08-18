@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::Arc;
 
 use cashu_wallet::store::UnitedStore;
@@ -6,6 +7,7 @@ use cashu_wallet::wallet::HttpOptions;
 use cashu_wallet::UniError;
 use cashu_wallet::UniErrorFrom;
 use cashu_wallet::UnitedWallet;
+use cashu_wallet::Url;
 
 pub use cashu_wallet::store::impl_redb::Redb;
 pub type UniWallet = UnitedWallet<Arc<Redb>>;
@@ -54,6 +56,138 @@ where
         res?;
     }
     Ok(())
+}
+
+use std::collections::BTreeMap as Map;
+use std::fs::File;
+use tokio::sync::Mutex;
+#[derive(Debug, Default)]
+struct MintsBlocker {
+    map: Map<String, MintBlocked>,
+    file_modified: u64,
+}
+use std::sync::OnceLock;
+static MINTS_BLOCKEDR: OnceLock<parking_lot::Mutex<MintsBlocker>> = OnceLock::new();
+use std::path::PathBuf;
+impl MintsBlocker {
+    fn load(file: &PathBuf) -> anyhow::Result<()> {
+        let inited = MINTS_BLOCKEDR.get().map(|s| s.lock().file_modified);
+
+        let mut f = File::options()
+            .read(true)
+            .append(true)
+            .create_new(true)
+            .open(file)?;
+        let file_modified = f
+            .metadata()?
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|t| t.as_millis() as u64)
+            .unwrap_or(0);
+
+        let load = inited
+            .map(|ts| file_modified == 0 || ts < file_modified)
+            .unwrap_or(true);
+
+        let mut map = Map::new();
+        if load {
+            let mut str = String::new();
+            f.read_to_string(&mut str)?;
+            for (i, l) in str.lines().enumerate() {
+                let js = l.trim();
+                if js.starts_with('{') {
+                    match serde_json::from_str::<MintBlocked>(js) {
+                        Ok(mut mb) => {
+                            mb.blocker = Some(Arc::new(Mutex::new(AtomicBool::new(mb.added))));
+                            let host = mb
+                                .url
+                                .as_ref()
+                                .host_str()
+                                .ok_or_else(|| format_err!("the host url is none"))?;
+                            map.insert(host.to_owned(), mb);
+                        }
+                        Err(e) => {
+                            error!(
+                                "MintBlocked {} line-{} load faild: {} {}",
+                                file.display(),
+                                i,
+                                js,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let blocker = MintsBlocker { file_modified, map };
+
+        if inited.is_none() {
+            MINTS_BLOCKEDR
+                .set(parking_lot::Mutex::new(blocker))
+                .expect("MINTS_BLOCKEDR.set");
+        } else {
+            // todo: use old blocker for per mint
+            let mut lock = MINTS_BLOCKEDR.get().unwrap().lock();
+            *lock = blocker;
+        }
+
+        Ok(())
+    }
+    fn flush(file: &PathBuf) -> anyhow::Result<()> {
+        // Self::load(file)?;
+        let lock = MINTS_BLOCKEDR.get().unwrap();
+        let blocked = {
+            let lock = lock.lock();
+            let mut blocked = Vec::with_capacity(lock.map.len());
+            for b in lock.map.values() {
+                let js = serde_json::to_string(&b).unwrap();
+                blocked.push((b.ts, js));
+            }
+            blocked.sort_by_key(|bs| bs.0);
+            blocked
+        };
+
+        let mut str = String::new();
+        for (_, b) in blocked {
+            str.push_str(&b);
+            str.push_str("\n");
+        }
+
+        if str.len() > 1 {
+            std::fs::write(file, &str)?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    #[test]
+    fn test_for_mint_host() {
+        let url: Url = "https://8333.space".parse().unwrap();
+        assert_eq!(url.as_ref().host_str().unwrap(), "8333.space");
+
+        let url: Url = "https://8333.space:8338".parse().unwrap();
+        assert_eq!(url.as_ref().host_str().unwrap(), "8333.space");
+
+        let url: Url = "https://mint.8333.space:8338".parse().unwrap();
+        assert_eq!(url.as_ref().host_str().unwrap(), "mint.8333.space");
+    }
+}
+
+use std::sync::atomic::*;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MintBlocked {
+    url: Url,
+    ts: u64,
+    added: bool,
+    #[serde(skip)]
+    blocker: Option<Arc<Mutex<AtomicBool>>>,
 }
 
 pub async fn receive_tokens<State>(
