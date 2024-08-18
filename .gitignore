@@ -5,6 +5,7 @@
 **.sqlite
 **.sqlite3
 **.env
+**mints.txt
 s3tool/x.*
 **.json
 

@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::sync::Arc;
 
+use cashu_wallet::cashu::util::unix_time;
 use cashu_wallet::store::UnitedStore;
 use cashu_wallet::wallet::AmountHelper;
 use cashu_wallet::wallet::HttpOptions;
@@ -37,6 +38,10 @@ pub async fn crate_cashu_wallet(conf: &Config, _add_mints: bool) -> Result<UniWa
         try_add_mints(&wallet, conf).await?;
     }
 
+    if let Some(listfile) = &conf.mints_file {
+        MintsBlocker::load(listfile).await?;
+    }
+
     Ok(wallet)
 }
 
@@ -63,20 +68,72 @@ use std::fs::File;
 use tokio::sync::Mutex;
 #[derive(Debug, Default)]
 struct MintsBlocker {
-    map: Map<String, MintBlocked>,
+    map: Map<String, MintRecord>,
+    file: PathBuf,
     file_modified: u64,
 }
 use std::sync::OnceLock;
-static MINTS_BLOCKEDR: OnceLock<parking_lot::Mutex<MintsBlocker>> = OnceLock::new();
+static MINTS_BLOCKEDR: OnceLock<Mutex<MintsBlocker>> = OnceLock::new();
 use std::path::PathBuf;
 impl MintsBlocker {
-    fn load(file: &PathBuf) -> anyhow::Result<()> {
-        let inited = MINTS_BLOCKEDR.get().map(|s| s.lock().file_modified);
+    async fn get<State>(
+        url: &Url,
+        state: State,
+    ) -> anyhow::Result<Option<Blocker>, UniError<<State::Store as UnitedStore>::Error>>
+    where
+        State: StateTrait + Send + 'static,
+        UniError<<State::Store as UnitedStore>::Error>: UniErrorFrom<State::Store>,
+    {
+        let host = url
+            .as_ref()
+            .host_str()
+            .ok_or_else(|| format_err!("mint url not contains host"))?;
+        let lock = MINTS_BLOCKEDR.get().unwrap();
+
+        let blocker;
+        let mut lock = lock.lock().await;
+        if let Some(m) = lock.map.get(host) {
+            if m.blocked {
+                return Err(format_err!(
+                    "the host of mintUrl {} already blocked: {}",
+                    host,
+                    url.as_str()
+                )
+                .into());
+            } else {
+                return Ok(m.blocker.clone());
+            }
+        } else {
+            let record = MintRecord::new(url);
+            blocker = record.blocker.clone().unwrap();
+            lock.map.insert(host.to_owned(), record);
+        }
+
+        let _blocker = blocker.lock_owned().await;
+        let w = state.as_wallet();
+        let res = w
+            .add_mint_with_units(url.clone(), false, &["sat"], None)
+            .await;
+        warn!("add_mint_with_units {} got: {:?}", url.as_str(), res);
+        // if res.is_err() {
+        // }
+        let _ = lock;
+
+        Ok(None)
+    }
+    async fn load(file: &PathBuf) -> anyhow::Result<()> {
+        let inited = if let Some(lock) = MINTS_BLOCKEDR.get() {
+            let l = lock.lock().await;
+            Some(l.file_modified)
+        } else {
+            None
+        };
 
         let mut f = File::options()
             .read(true)
-            .append(true)
-            .create_new(true)
+            .write(true)
+            .create(true)
+            // .append(true)
             .open(file)?;
         let file_modified = f
             .metadata()?
@@ -97,9 +154,9 @@ impl MintsBlocker {
             for (i, l) in str.lines().enumerate() {
                 let js = l.trim();
                 if js.starts_with('{') {
-                    match serde_json::from_str::<MintBlocked>(js) {
+                    match serde_json::from_str::<MintRecord>(js) {
                         Ok(mut mb) => {
-                            mb.blocker = Some(Arc::new(Mutex::new(AtomicBool::new(mb.added))));
+                            mb.blocker = Some(new_blocker(mb.blocked));
                             let host = mb
                                 .url
                                 .as_ref()
@@ -109,7 +166,7 @@ impl MintsBlocker {
                         }
                         Err(e) => {
                             error!(
-                                "MintBlocked {} line-{} load faild: {} {}",
+                                "MintRecord {} line-{} load faild: {} {}",
                                 file.display(),
                                 i,
                                 js,
@@ -121,25 +178,29 @@ impl MintsBlocker {
             }
         }
 
-        let blocker = MintsBlocker { file_modified, map };
+        let blocker = MintsBlocker {
+            file_modified,
+            map,
+            file: file.to_owned(),
+        };
 
         if inited.is_none() {
             MINTS_BLOCKEDR
-                .set(parking_lot::Mutex::new(blocker))
+                .set(Mutex::new(blocker))
                 .expect("MINTS_BLOCKEDR.set");
         } else {
             // todo: use old blocker for per mint
-            let mut lock = MINTS_BLOCKEDR.get().unwrap().lock();
+            let mut lock = MINTS_BLOCKEDR.get().unwrap().lock().await;
             *lock = blocker;
         }
 
         Ok(())
     }
-    fn flush(file: &PathBuf) -> anyhow::Result<()> {
+    async fn flush(file: &PathBuf) -> anyhow::Result<()> {
         // Self::load(file)?;
         let lock = MINTS_BLOCKEDR.get().unwrap();
         let blocked = {
-            let lock = lock.lock();
+            let lock = lock.lock().await;
             let mut blocked = Vec::with_capacity(lock.map.len());
             for b in lock.map.values() {
                 let js = serde_json::to_string(&b).unwrap();
@@ -180,14 +241,29 @@ pub mod tests {
     }
 }
 
+type Blocker = Arc<Mutex<AtomicBool>>;
+fn new_blocker(b: bool) -> Blocker {
+    Arc::new(Mutex::new(AtomicBool::new(b)))
+}
+
 use std::sync::atomic::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MintBlocked {
+struct MintRecord {
     url: Url,
     ts: u64,
-    added: bool,
+    blocked: bool,
     #[serde(skip)]
-    blocker: Option<Arc<Mutex<AtomicBool>>>,
+    blocker: Option<Blocker>,
+}
+impl MintRecord {
+    fn new(url: &Url) -> Self {
+        Self {
+            url: url.clone(),
+            ts: unix_time(),
+            blocked: false,
+            blocker: Some(new_blocker(false)),
+        }
+    }
 }
 
 pub async fn receive_tokens<State>(
@@ -198,7 +274,7 @@ pub async fn receive_tokens<State>(
     state: State,
 ) -> Result<Option<()>, UniError<<State::Store as UnitedStore>::Error>>
 where
-    State: StateTrait + Send + 'static,
+    State: StateTrait + Send + 'static + Clone,
     UniError<<State::Store as UnitedStore>::Error>: UniErrorFrom<State::Store>,
 {
     let tokens: cashu_wallet::wallet::Token = cashu
@@ -214,7 +290,7 @@ where
         return Err(format_err!("cashu tokens amount not enough: {}/{}", amount, price).into());
     }
 
-    let conf = state.as_config();
+    // let conf = state.as_config();
     let mint_url = tokens
         .token
         .iter()
@@ -222,8 +298,22 @@ where
         .next()
         .ok_or_else(|| format_err!("cashu tokens not contains mint url"))?;
 
-    if !conf.mints().contains(&mint_url) {
-        return Err(format_err!("unsupport mint url").into());
+    // if !conf.mints().contains(&mint_url) {
+    //     return Err(format_err!("unsupport mint url").into());
+    // }
+    if !state.as_wallet().contains(&mint_url)? {
+        let blocker = MintsBlocker::get(&mint_url, state.clone()).await?;
+        if let Some(blocker) = blocker {
+            let b = blocker.lock().await;
+            if b.load(Ordering::SeqCst) {
+                return Err(format_err!(
+                    "the host of mintUrl {} already blocked: {}",
+                    mint_url.as_ref().host_str().unwrap_or_default(),
+                    mint_url.as_str()
+                )
+                .into());
+            }
+        }
     }
 
     // if state.as_limits().cashu_failed_check(ip, &conf.limits) {
@@ -233,21 +323,25 @@ where
     let start = std::time::Instant::now();
     let eventid = eventid.to_owned();
     let ip = ip.to_owned();
-    let cashu = cashu.to_owned();
     let fut = async move {
-        let res = state.as_wallet().receive_tokens(&cashu).await;
+        let mut txs = vec![];
+        let res = state
+            .as_wallet()
+            .receive_tokens_full_limit_unit(&tokens, &mut txs, &[])
+            .await;
+        let a = txs.iter().map(|tx| tx.amount()).sum::<u64>();
         let costms = start.elapsed().as_millis();
         state
             .as_metrics()
             .0
             .send(crate::Metric {
                 costms: costms as _,
-                amount: res.as_ref().map(|a| *a as u32).unwrap_or(0),
+                amount: a as u32,
             })
             .unwrap();
 
         match res {
-            Ok(a) if a >= amount => {
+            Ok(_) if a >= amount => {
                 info!(
                     "{}'s {:?} tokens receive {} {}ms ok: {}",
                     eventid, ip, price, costms, a,
