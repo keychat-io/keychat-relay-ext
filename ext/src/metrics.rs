@@ -1,5 +1,9 @@
+use cashu_wallet::store::ProofExtended;
+use cashu_wallet::types::unixtime_ms;
+use cashu_wallet::types::TransactionStatus;
 use cashu_wallet::wallet::AmountHelper;
 use cashu_wallet::wallet::ProofsHelper;
+use cashu_wallet::wallet::TokenGeneric;
 use cashu_wallet::wallet::Wallet;
 use cashu_wallet::Url;
 use dashmap::DashMap;
@@ -221,14 +225,9 @@ where
                     info!("tick {:?}, limits.cashu_failed: {}->{}", tick.elapsed(), size, size2);
 
                     if let Ok(mut map) = all {
-                        map.retain(|k, _v| {
+                        map.retain(|_k, _v| {
                             // 64+fee
                             *_v > 68
-                                && state
-                                    .as_config()
-                                    .mints()
-                                    .iter()
-                                    .all(|m| m.as_str() != k.mint())
                         });
                         if map.len() >= 1 {
                             if swap.is_some() {
@@ -270,15 +269,57 @@ where
     let _trustw = wallet.get_wallet(trustu)?;
 
     for (k, v) in map {
-        info!("move_token: {} {}: {}", k.mint(), k.unit(), v);
-        let url = k.mint().parse().unwrap();
+        let ts = unixtime_ms() - 3600 * 1000;
+        let txs = wallet
+            .store()
+            .delete_transactions(&[TransactionStatus::Success], ts)
+            .await;
+
+        info!(
+            "move_token: {} {}: {}, remove txs: {:?}",
+            k.mint(),
+            k.unit(),
+            v,
+            txs
+        );
+        let url = k.mint().parse()?;
 
         if wallet.contains(&url)? {
-            let mut block = false;
-            let swap =
-                move_token_by_swap(wallet, _trustw.as_ref(), &url, k.unit(), &mut block).await;
-            info!("move_token: {} {}: {} -> {:?}", k.mint(), k.unit(), v, swap);
-            if swap.is_err() && block {}
+            if config.mints().iter().any(|m| m.as_str() == k.mint()) {
+                // white-list, merge 1sat to 128+
+                let mut ps = wallet.store().get_proofs_limit_unit(&url, k.unit()).await?;
+                let psc = ps.len();
+                ps.retain(|p| p.as_ref().amount.to_u64() < 10);
+                let psc_small = ps.len();
+                info!(
+                    "move_token.merge: {} {}: {} {}/{}",
+                    k.mint(),
+                    k.unit(),
+                    v,
+                    psc_small,
+                    psc,
+                );
+                let size = 128;
+                if ps.len() < size {
+                    continue;
+                }
+
+                let pss = &ps[..=size];
+                let merge = merge_token_by_swap(wallet, &url, k.unit(), pss).await;
+                info!(
+                    "merge_token: {} {}: {} -> {:?}",
+                    k.mint(),
+                    k.unit(),
+                    v,
+                    merge
+                );
+            } else {
+                let mut block = false;
+                let swap =
+                    move_token_by_swap(wallet, _trustw.as_ref(), &url, k.unit(), &mut block).await;
+                info!("move_token: {} {}: {} -> {:?}", k.mint(), k.unit(), v, swap);
+                if swap.is_err() && block {}
+            }
         } else {
             // move on next time
             let add = wallet
@@ -295,6 +336,34 @@ where
     }
 
     Ok(())
+}
+
+async fn merge_token_by_swap<S>(
+    wallet: &UnitedWallet<S>,
+    url: &Url,
+    unit: &str,
+    pss: &[ProofExtended],
+) -> anyhow::Result<(u64, u64)>
+where
+    S: UnitedStore + Clone + Send + Sync + 'static,
+    UniError<S::Error>: UniErrorFrom<S>,
+{
+    let amount = pss.sum().to_u64();
+    let pss2 = pss.iter().map(|p| p.as_ref().clone()).collect::<Vec<_>>();
+    let token = TokenGeneric::new(url.clone(), pss2, None, Some(unit.into()))?;
+
+    let w = wallet.get_wallet(url)?;
+    let mut recv = 0u64;
+    for t in &token.token {
+        let ps = w.receive_token(t, Some(unit), wallet.store()).await?;
+        recv += ps.sum().to_u64();
+        let ps = ps.into_extended_with_unit(Some(unit));
+        wallet.store().add_proofs(url, &ps).await?;
+    }
+
+    wallet.store().delete_proofs(url, pss).await?;
+
+    Ok((recv, amount))
 }
 
 async fn move_token_by_swap<S>(
@@ -393,6 +462,19 @@ where
     }
 
     if pm.paid {
+        wallet
+            .store()
+            .delete_proofs(url, &ps)
+            .await
+            .map_err(|e| {
+                error!(
+                    "remove proofs after melt failed {} {}: {}",
+                    url.as_str(),
+                    amount_with_fee,
+                    e
+                )
+            })
+            .ok();
         let tx = wallet
             .mint_tokens(
                 trust.client().url(),
