@@ -224,22 +224,16 @@ where
                     let size2 = limits.store_for_cashu_failed.len();
                     info!("tick {:?}, limits.cashu_failed: {}->{}", tick.elapsed(), size, size2);
 
-                    if let Ok(mut map) = all {
-                        map.retain(|_k, _v| {
-                            // 64+fee
-                            *_v > 68
-                        });
-                        if map.len() >= 1 {
-                            if swap.is_some() {
-                                if swap.as_ref().map(|j: &tokio::task::JoinHandle<anyhow::Result<()>> |j.is_finished()).unwrap_or_default() {
-                                    let j = swap.take().unwrap();
-                                    let res = j.await;
-                                    info!("move_token: {:?}", res);
-                                }
-                            } else {
-                                let fut = tokio::spawn(move_token(state.clone(), map));
-                                swap = Some(fut);
+                    if let Ok(map) = all {
+                        if swap.is_some() {
+                            if swap.as_ref().map(|j: &tokio::task::JoinHandle<anyhow::Result<()>> |j.is_finished()).unwrap_or_default() {
+                                let j = swap.take().unwrap();
+                                let res = j.await;
+                                info!("move_token: {:?}", res);
                             }
+                        } else {
+                            let fut = tokio::spawn(move_token(state.clone(), map));
+                            swap = Some(fut);
                         }
                     }
                 }
@@ -268,6 +262,18 @@ where
         .ok_or_else(|| format_err!("get fisrt trust mint"))?;
     let _trustw = wallet.get_wallet(trustu)?;
 
+    let balances_for_untrusted_mint = map
+        .iter()
+        .filter(|(k, _v)| config.mints().iter().all(|m| m.as_str() != k.mint()))
+        .map(|(k, v)| (k.mint(), *v))
+        .collect::<Vec<_>>();
+    if balances_for_untrusted_mint.len() >= 1 {
+        let records =
+            crate::cashu::MintsBlocker::update_balances(balances_for_untrusted_mint.into_iter())
+                .await;
+        info!("MintsBlocker.records: {:?}", records);
+    }
+
     for (k, v) in map {
         let ts = unixtime_ms() - 3600 * 1000;
         let txs = wallet
@@ -285,43 +291,49 @@ where
         let url = k.mint().parse()?;
 
         if wallet.contains(&url)? {
+            // white-list, merge 1sat to 128+
             if config.mints().iter().any(|m| m.as_str() == k.mint()) {
-                // white-list, merge 1sat to 128+
                 let mut ps = wallet.store().get_proofs_limit_unit(&url, k.unit()).await?;
                 let psc = ps.len();
                 ps.retain(|p| p.as_ref().amount.to_u64() < 10);
                 let psc_small = ps.len();
+                let size = 128;
+
                 info!(
-                    "move_token.merge: {} {}: {} {}/{}",
+                    "move_token.merge: {} {}: {} {}->{}>={}: {} ",
                     k.mint(),
                     k.unit(),
                     v,
-                    psc_small,
                     psc,
+                    psc_small,
+                    size,
+                    psc_small >= size,
                 );
-                let size = 128;
                 if ps.len() < size {
                     continue;
                 }
 
-                let pss = &ps[..=size];
+                let pss = &ps[..size];
                 let merge = merge_token_by_swap(wallet, &url, k.unit(), pss).await;
                 info!(
-                    "merge_token: {} {}: {} -> {:?}",
+                    "merge_token: {} {} {}: {} {:?}",
                     k.mint(),
                     k.unit(),
                     v,
+                    pss.sum().to_u64(),
                     merge
                 );
-            } else {
+            } else if v >= config.fee.untrusted_mint_should_transfer {
                 let mut block = false;
                 let swap =
                     move_token_by_swap(wallet, _trustw.as_ref(), &url, k.unit(), &mut block).await;
                 info!("move_token: {} {}: {} -> {:?}", k.mint(), k.unit(), v, swap);
-                if swap.is_err() && block {}
+                if swap.is_err() && block {
+                    // todo
+                }
             }
         } else {
-            // move on next time
+            // next time
             let add = wallet
                 .add_mint_with_units(url, false, &["sat"], None)
                 .await?;
@@ -343,27 +355,27 @@ async fn merge_token_by_swap<S>(
     url: &Url,
     unit: &str,
     pss: &[ProofExtended],
-) -> anyhow::Result<(u64, u64)>
+) -> anyhow::Result<(usize, usize)>
 where
     S: UnitedStore + Clone + Send + Sync + 'static,
     UniError<S::Error>: UniErrorFrom<S>,
 {
-    let amount = pss.sum().to_u64();
+    let before = pss.len();
     let pss2 = pss.iter().map(|p| p.as_ref().clone()).collect::<Vec<_>>();
     let token = TokenGeneric::new(url.clone(), pss2, None, Some(unit.into()))?;
 
     let w = wallet.get_wallet(url)?;
-    let mut recv = 0u64;
+    let mut after = 0usize;
     for t in &token.token {
         let ps = w.receive_token(t, Some(unit), wallet.store()).await?;
-        recv += ps.sum().to_u64();
+        after += ps.len();
         let ps = ps.into_extended_with_unit(Some(unit));
         wallet.store().add_proofs(url, &ps).await?;
     }
 
     wallet.store().delete_proofs(url, pss).await?;
 
-    Ok((recv, amount))
+    Ok((after, before))
 }
 
 async fn move_token_by_swap<S>(

@@ -21,6 +21,8 @@ mints = [
 ]
 # for api /v1/info
 expired = "14 Days"
+# untrusted_mint_balance_limit = 512
+# untrusted_mint_should_transfer = 132
 
 # cost_per_event = 1
 # 10m

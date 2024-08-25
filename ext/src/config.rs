@@ -130,12 +130,23 @@ impl Config {
     }
 }
 
+fn default_untrusted_mint_balance_limit() -> u64 {
+    512
+}
+// 128+fee
+fn default_untrusted_mint_should_transfer() -> u64 {
+    132
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Fee {
     pub unit: String,
     pub mints: Vec<cashu_wallet::Url>,
     pub maxsize: u64,
     pub prices: Vec<Price>,
+    #[serde(default = "default_untrusted_mint_balance_limit")]
+    pub untrusted_mint_balance_limit: u64,
+    #[serde(default = "default_untrusted_mint_should_transfer")]
+    pub untrusted_mint_should_transfer: u64,
     #[serde(default)]
     pub expired: String,
 }

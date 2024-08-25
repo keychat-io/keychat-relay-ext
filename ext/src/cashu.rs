@@ -67,7 +67,7 @@ use std::collections::BTreeMap as Map;
 use std::fs::File;
 use tokio::sync::Mutex;
 #[derive(Debug, Default)]
-struct MintsBlocker {
+pub(crate) struct MintsBlocker {
     map: Map<String, MintRecord>,
     file: PathBuf,
     file_modified: u64,
@@ -93,6 +93,15 @@ impl MintsBlocker {
         let blocker;
         let mut lock = lock.lock().await;
         if let Some(m) = lock.map.get(host) {
+            if m.amount > state.as_config().fee.untrusted_mint_balance_limit {
+                return Err(format_err!(
+                    "the host of mintUrl {} already blocked temporaty: {}",
+                    host,
+                    url.as_str()
+                )
+                .into());
+            }
+
             if m.blocked {
                 return Err(format_err!(
                     "the host of mintUrl {} already blocked: {}",
@@ -104,7 +113,7 @@ impl MintsBlocker {
                 return Ok(m.blocker.clone());
             }
         } else {
-            let record = MintRecord::new(url);
+            let record = MintRecord::new(url.clone());
             blocker = record.blocker.clone().unwrap();
             lock.map.insert(host.to_owned(), record);
         }
@@ -166,7 +175,7 @@ impl MintsBlocker {
                         }
                         Err(e) => {
                             error!(
-                                "MintRecord {} line-{} load faild: {} {}",
+                                "MintRecord {} line-{} parse faild: {} {}",
                                 file.display(),
                                 i,
                                 js,
@@ -196,19 +205,43 @@ impl MintsBlocker {
 
         Ok(())
     }
-    async fn flush(file: &PathBuf) -> anyhow::Result<()> {
-        // Self::load(file)?;
+    pub(crate) async fn update_balances(
+        balances: impl Iterator<Item = (&str, u64)>,
+    ) -> anyhow::Result<usize> {
         let lock = MINTS_BLOCKEDR.get().unwrap();
-        let blocked = {
-            let lock = lock.lock().await;
-            let mut blocked = Vec::with_capacity(lock.map.len());
-            for b in lock.map.values() {
-                let js = serde_json::to_string(&b).unwrap();
-                blocked.push((b.ts, js));
+        let size = {
+            let mut lock = lock.lock().await;
+            for (k, v) in balances {
+                let url = k.parse::<Url>()?;
+                let host = url
+                    .as_ref()
+                    .host_str()
+                    .ok_or_else(|| format_err!("the host url is none"))?;
+
+                if let Some(b) = lock.map.get_mut(host) {
+                    b.amount = v;
+                } else {
+                    let mut b = MintRecord::new(k.parse()?);
+                    b.amount = v;
+
+                    lock.map.insert(host.to_string(), b);
+                }
             }
-            blocked.sort_by_key(|bs| bs.0);
-            blocked
+            lock.map.len()
         };
+
+        Ok(size)
+    }
+    #[allow(dead_code)]
+    async fn flush() -> anyhow::Result<()> {
+        let lock = MINTS_BLOCKEDR.get().unwrap();
+        let lock = lock.lock().await;
+        let mut blocked = Vec::with_capacity(lock.map.len());
+        for b in lock.map.values() {
+            let js = serde_json::to_string(&b).unwrap();
+            blocked.push((b.ts, js));
+        }
+        blocked.sort_by_key(|bs| bs.0);
 
         let mut str = String::new();
         for (_, b) in blocked {
@@ -217,7 +250,7 @@ impl MintsBlocker {
         }
 
         if str.len() > 1 {
-            std::fs::write(file, &str)?;
+            std::fs::write(&lock.file, &str)?;
         }
 
         Ok(())
@@ -251,15 +284,17 @@ use std::sync::atomic::*;
 struct MintRecord {
     url: Url,
     ts: u64,
+    amount: u64,
     blocked: bool,
     #[serde(skip)]
     blocker: Option<Blocker>,
 }
 impl MintRecord {
-    fn new(url: &Url) -> Self {
+    fn new(url: Url) -> Self {
         Self {
-            url: url.clone(),
+            url,
             ts: unix_time(),
+            amount: 0,
             blocked: false,
             blocker: Some(new_blocker(false)),
         }
@@ -290,7 +325,7 @@ where
         return Err(format_err!("cashu tokens amount not enough: {}/{}", amount, price).into());
     }
 
-    // let conf = state.as_config();
+    let conf = state.as_config();
     let mint_url = tokens
         .token
         .iter()
@@ -301,7 +336,7 @@ where
     // if !conf.mints().contains(&mint_url) {
     //     return Err(format_err!("unsupport mint url").into());
     // }
-    if !state.as_wallet().contains(&mint_url)? {
+    if !(conf.mints().contains(&mint_url) && state.as_wallet().contains(&mint_url)?) {
         let blocker = MintsBlocker::get(&mint_url, state.clone()).await?;
         if let Some(blocker) = blocker {
             let b = blocker.lock().await;
