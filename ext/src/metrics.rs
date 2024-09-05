@@ -3,7 +3,7 @@ use cashu_wallet::types::unixtime_ms;
 use cashu_wallet::types::TransactionStatus;
 use cashu_wallet::wallet::AmountHelper;
 use cashu_wallet::wallet::ProofsHelper;
-use cashu_wallet::wallet::TokenGeneric;
+use cashu_wallet::wallet::TokenV3Generic;
 use cashu_wallet::wallet::Wallet;
 use cashu_wallet::Url;
 use dashmap::DashMap;
@@ -225,13 +225,13 @@ where
                     info!("tick {:?}, limits.cashu_failed: {}->{}", tick.elapsed(), size, size2);
 
                     if let Ok(map) = all {
-                        if swap.is_some() {
-                            if swap.as_ref().map(|j: &tokio::task::JoinHandle<anyhow::Result<()>> |j.is_finished()).unwrap_or_default() {
-                                let j = swap.take().unwrap();
-                                let res = j.await;
-                                info!("move_token: {:?}", res);
-                            }
-                        } else {
+                        if swap.as_ref().map(|j: &tokio::task::JoinHandle<anyhow::Result<()>> |j.is_finished()).unwrap_or_default() {
+                            let j = swap.take().unwrap();
+                            let res = j.await;
+                            info!("move_token: {:?}", res);
+                        }
+
+                        if swap.is_none() {
                             let fut = tokio::spawn(move_token(state.clone(), map));
                             swap = Some(fut);
                         }
@@ -362,7 +362,7 @@ where
 {
     let before = pss.len();
     let pss2 = pss.iter().map(|p| p.as_ref().clone()).collect::<Vec<_>>();
-    let token = TokenGeneric::new(url.clone(), pss2, None, Some(unit.into()))?;
+    let token = TokenV3Generic::new(url.clone(), pss2, None, Some(unit.parse()?))?;
 
     let w = wallet.get_wallet(url)?;
     let mut after = 0usize;
@@ -409,29 +409,36 @@ where
         fee_reserve
     );
     ensure!(
-        balance > fee_reserve,
+        balance > fee_reserve.into(),
         "balance<=fee.reserve pre: {}<={}",
         balance,
         fee_reserve
     );
 
     *block = false;
-    let amount = balance - fee_reserve;
+    let amount = balance - fee_reserve.as_ref();
     let mintquote = trust.request_mint(amount.into(), Some(unit), None).await?;
     let bill = mintquote.request.parse()?;
 
     *block = true;
     let meltquote = w.request_melt(&bill, Some(unit), None).await?;
     let mut fee = meltquote.fee_reserve;
-    info!("swap melt form1 {}: {} {}", url.as_str(), amount, fee);
+    info!(
+        "swap melt form1 {}: {} {} {} {}",
+        url.as_str(),
+        amount,
+        fee,
+        mintquote.quote,
+        mintquote.request
+    );
 
     ensure!(
-        meltquote.amount == amount,
+        *meltquote.amount.as_ref() == amount,
         "meltquote.amount != amount: {}!={}",
         meltquote.amount,
         amount
     );
-    let amount_with_fee = amount + fee;
+    let amount_with_fee = amount + fee.as_ref();
     if amount_with_fee != balance {
         *block = false; //?
                         // todo: handle < balance
@@ -459,7 +466,7 @@ where
         url.as_str(),
         amount,
         fee,
-        pm.paid,
+        pm.state,
         pm.preimage,
         pm.change.as_ref().map(|ps| ps.len())
     );
@@ -468,12 +475,12 @@ where
         let remain = remain.into_extended_with_unit(Some(unit));
         wallet.store().add_proofs(url, &remain).await?;
         let ra = remain.sum();
-        if fee >= ra.to_u64() {
-            fee -= ra.to_u64();
+        if fee >= ra {
+            fee -= ra;
         }
     }
 
-    if pm.paid {
+    if pm.state == cashu_wallet::cashu::nuts::nut05::QuoteState::Paid {
         wallet
             .store()
             .delete_proofs(url, &ps)
@@ -495,8 +502,8 @@ where
                 Some(unit),
             )
             .await?;
-        return Ok((tx.amount(), fee));
+        return Ok((tx.amount(), fee.into()));
     }
 
-    bail!("not paid")
+    bail!("{}", pm.state)
 }

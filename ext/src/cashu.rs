@@ -315,6 +315,7 @@ where
     let tokens: cashu_wallet::wallet::Token = cashu
         .parse()
         .map_err(|e| format_err!(format!("cashu tokens decode: {}", e)))?;
+    let tokens = tokens.into_v3()?;
     let amount = tokens
         .token
         .iter()
@@ -362,7 +363,7 @@ where
         let mut txs = vec![];
         let res = state
             .as_wallet()
-            .receive_tokens_full_limit_unit(&tokens, &mut txs, &[])
+            .receive_tokens_full_limit_unit(&tokens.into(), &mut txs, &[])
             .await;
         let a = txs.iter().map(|tx| tx.amount()).sum::<u64>();
         let costms = start.elapsed().as_millis();
