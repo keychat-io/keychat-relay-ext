@@ -5,6 +5,7 @@ use cashu_wallet::wallet::AmountHelper;
 use cashu_wallet::wallet::ProofsHelper;
 use cashu_wallet::wallet::TokenV3Generic;
 use cashu_wallet::wallet::Wallet;
+use cashu_wallet::wallet::WalletError;
 use cashu_wallet::Url;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -350,6 +351,7 @@ where
     Ok(())
 }
 
+use cashu_wallet::wallet::ClientError;
 async fn merge_token_by_swap<S>(
     wallet: &UnitedWallet<S>,
     url: &Url,
@@ -367,7 +369,50 @@ where
     let w = wallet.get_wallet(url)?;
     let mut after = 0usize;
     for t in &token.token {
-        let ps = w.receive_token(t, Some(unit), wallet.store()).await?;
+        let ps = w.receive_token(t, Some(unit), wallet.store()).await;
+
+        if let Err(WalletError::Client(ClientError::Mint(_code, desc))) = &ps {
+            if desc.contains("Token already spent.") {
+                let state = w.check_proofs(pss).await?;
+                if state.states.len() != pss.len() {
+                    return Err(format_err!(
+                        "invalid check_proofs response {}->{}",
+                        pss.len(),
+                        state.states.len(),
+                    )
+                    .into());
+                }
+
+                let mut deletec = 0usize;
+                for (idx, b) in state.states.into_iter().enumerate() {
+                    let is_spent = b.state == cashu_wallet::cashu::nuts::nut07::State::Spent;
+                    if is_spent {
+                        let ps = &pss[idx..=idx];
+
+                        wallet
+                            .store()
+                            .delete_proofs(url, ps)
+                            .await
+                            .map_err(|e| {
+                                error!(
+                                    "delete_proofs for alrendy spent {}: {} {}",
+                                    url, e, ps[0].js
+                                )
+                            })
+                            .ok();
+                        deletec += 1;
+                    }
+                }
+                error!(
+                    "delete_proofs for alrendy spent {}: {}/{}",
+                    url,
+                    deletec,
+                    pss.len()
+                );
+            }
+        }
+
+        let ps = ps?;
         after += ps.len();
         let ps = ps.into_extended_with_unit(Some(unit));
         wallet.store().add_proofs(url, &ps).await?;
@@ -460,7 +505,50 @@ where
             None,
             wallet.store(),
         )
-        .await?;
+        .await;
+
+    if let Err(WalletError::Client(ClientError::Mint(_code, desc))) = &pm {
+        if desc.contains("Token already spent.") {
+            let state = w.check_proofs(&ps).await?;
+            if state.states.len() != ps.len() {
+                return Err(format_err!(
+                    "invalid check_proofs response {}->{}",
+                    ps.len(),
+                    state.states.len(),
+                )
+                .into());
+            }
+
+            let mut deletec = 0usize;
+            for (idx, b) in state.states.into_iter().enumerate() {
+                let is_spent = b.state == cashu_wallet::cashu::nuts::nut07::State::Spent;
+                if is_spent {
+                    let ps = &ps[idx..=idx];
+
+                    wallet
+                        .store()
+                        .delete_proofs(url, ps)
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                "delete_proofs for alrendy spent {}: {} {}",
+                                url, e, ps[0].js
+                            )
+                        })
+                        .ok();
+                    deletec += 1;
+                }
+            }
+            error!(
+                "delete_proofs for alrendy spent {}: {}/{}",
+                url,
+                deletec,
+                ps.len()
+            );
+        }
+    }
+
+    let pm = pm?;
     info!(
         "swap melt form1 {}: {} {} got {} {:?} {:?}",
         url.as_str(),
