@@ -18,3 +18,12 @@ location ^~/api/ {
                proxy_http_version 1.1;
            }
 ```
+
+##### Docker
+```sh
+docker run -d --name kcgas -v $PWD:/opt --network host debian:12 /opt/keychat-relay-gas -v -c /opt/gas.toml
+docker logs --tail 100 kcgas -f
+
+docker run -d --name kcsas -v $PWD:/opt -w /opt --network host debian:12 /opt/keychat-relay-sas -v -c /opt/sas.toml
+docker logs --tail 100 kcsas -f
+```

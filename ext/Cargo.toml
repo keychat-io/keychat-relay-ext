@@ -35,6 +35,7 @@ base64-simd.workspace = true
 url.workspace = true
 #
 cashu-wallet.workspace = true
+cashu-wallet-sqlite.workspace = true
 flume.workspace = true
 futures.workspace = true
 tokio.workspace = true

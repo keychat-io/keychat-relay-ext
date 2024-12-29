@@ -126,7 +126,7 @@ async fn put_object(
     "Ok"
 }
 
-// curl -X POST -H 'Content-type: application/json' --data '{"sha256": "oXLO3K5HR0thXFTVEKXYSo3qMDLpWFh0MLQTU4vj8zM=", "length": 3, "cashu": ""}' 0.0.0.0:9001/v1/object -v
+// curl -X POST -H 'Content-type: application/json' --data '{"sha256": "oXLO3K5HR0thXFTVEKXYSo3qMDLpWFh0MLQTU4vj8zM=", "length": 3, "cashu": ""}' 0.0.0.0:3001/v1/object -v
 async fn create_object(
     ConnectInfo(sa): ConnectInfo<SocketAddr>,
     AxumState(Handler { state }): AxumState<Handler>,

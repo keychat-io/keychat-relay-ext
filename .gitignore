@@ -2,6 +2,8 @@
 **.red
 **.redb
 **.db
+**.db-shm
+**.db-wal
 **.sqlite
 **.sqlite3
 **.env

@@ -138,12 +138,12 @@ impl AsRef<State> for State {
     }
 }
 
-use crate::cashu::Redb;
+use crate::cashu::LitePool;
 impl<T> StateTrait for T
 where
     T: AsRef<crate::State>,
 {
-    type Store = Arc<Redb>;
+    type Store = LitePool;
     fn as_config(&self) -> &Config {
         &self.as_ref().config
     }

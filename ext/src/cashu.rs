@@ -10,13 +10,17 @@ use cashu_wallet::UniErrorFrom;
 use cashu_wallet::UnitedWallet;
 use cashu_wallet::Url;
 
-pub use cashu_wallet::store::impl_redb::Redb;
-pub type UniWallet = UnitedWallet<Arc<Redb>>;
+pub use cashu_wallet_sqlite::LitePool;
+pub use cashu_wallet_sqlite::StoreError;
+pub type UniWallet = UnitedWallet<LitePool>;
 
 use crate::config::Config;
 use crate::metrics::StateTrait;
 
-pub async fn crate_cashu_wallet(conf: &Config, _add_mints: bool) -> Result<UniWallet, UniError> {
+pub async fn crate_cashu_wallet(
+    conf: &Config,
+    _add_mints: bool,
+) -> Result<UniWallet, UniError<StoreError>> {
     if conf.timeout_ms == 0 {
         return Err(format_err!("zero ms timeout").into());
     };
@@ -25,7 +29,24 @@ pub async fn crate_cashu_wallet(conf: &Config, _add_mints: bool) -> Result<UniWa
         return Err(format_err!("empty mints").into());
     }
 
-    let store = Redb::open(&conf.database, Default::default())?;
+    use cashu_wallet_sqlite::sqlx::{self, sqlite::SqliteConnectOptions};
+    let opts = conf
+        .database
+        .parse::<SqliteConnectOptions>()
+        .map_err(|e| StoreError::Database(e))?
+        .create_if_missing(true)
+        // .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        // prevent other thread open it
+        // .locking_mode(sqlx::sqlite::SqliteLockingMode::Exclusive)
+        // or normal
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Full);
+    info!("SqlitePool open: {:?}", opts);
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        // .max_connections(1)
+        .connect_with(opts)
+        .await
+        .map_err(|e| StoreError::Database(e))?;
+
     let http = HttpOptions::new()
         .connection_verbose(true)
         .timeout_connect_ms(2000)
@@ -33,6 +54,7 @@ pub async fn crate_cashu_wallet(conf: &Config, _add_mints: bool) -> Result<UniWa
         .timeout_swap_ms(conf.timeout_ms)
         .connection_verbose(true);
 
+    let store = LitePool::new(db, Default::default()).await?;
     let wallet = UnitedWallet::new(store, http);
     if _add_mints {
         try_add_mints(&wallet, conf).await?;

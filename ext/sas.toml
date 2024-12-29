@@ -10,7 +10,7 @@ remote_ip_header = "x-forwarded-for"
 allow_pending = false
 allow_free = false
 
-database = "relay.red"
+database = "relay.db"
 timeout_ms = 3000
 
 [fee]
