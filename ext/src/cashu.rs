@@ -5,6 +5,7 @@ use cashu_wallet::cashu::util::unix_time;
 use cashu_wallet::store::UnitedStore;
 use cashu_wallet::wallet::AmountHelper;
 use cashu_wallet::wallet::HttpOptions;
+use cashu_wallet::wallet::TokenV3Generic;
 use cashu_wallet::UniError;
 use cashu_wallet::UniErrorFrom;
 use cashu_wallet::UnitedWallet;
@@ -400,6 +401,150 @@ where
 
         match res {
             Ok(_) if a >= amount => {
+                info!(
+                    "{}'s {:?} tokens receive {} {}ms ok: {}",
+                    eventid, ip, price, costms, a,
+                );
+            }
+            res => {
+                // state.as_limits().cashu_failed_count(ip, &conf.limits);
+                error!(
+                    "{}'s {:?} tokens receive {} {}ms failed: {:?}",
+                    eventid, ip, price, costms, res
+                );
+                // return res.and_then(|a| Err(format_err!("tokens amount {}<{}", a, price).into()));
+            }
+        }
+    };
+
+    tokio::spawn(fut);
+
+    Ok(Some(()))
+}
+
+pub async fn receive_tokens2<State>(
+    cashu: Vec<&str>,
+    eventid: &str,
+    ip: &str,
+    price: u64,
+    state: State,
+) -> Result<Option<()>, UniError<<State::Store as UnitedStore>::Error>>
+where
+    State: StateTrait + Send + 'static + Clone,
+    UniError<<State::Store as UnitedStore>::Error>: UniErrorFrom<State::Store>,
+{
+    let mut total_amount = 0u64;
+    let mut all_tokens = Vec::new();
+    let mut mint_url: Option<cashu_wallet::Url> = None;
+    let mut unit = None;
+
+    for token_str in cashu {
+        let tokens: cashu_wallet::wallet::Token = token_str
+            .parse()
+            .map_err(|e| format_err!(format!("cashu tokens decode: {}", e)))?;
+        let tokens = tokens.into_v3()?;
+        
+        if mint_url.is_none() {
+            mint_url = tokens.token.iter().map(|t| t.mint.clone()).next();
+            unit = tokens.unit;
+        }
+
+        let amount = tokens
+            .token
+            .iter()
+            .map(|a| a.proofs.iter().map(|s| s.amount.to_u64()).sum::<u64>())
+            .sum::<u64>();
+        if amount < price {
+            return Err(format_err!("cashu tokens amount not enough: {}/{}", amount, price).into());
+        }
+
+        total_amount += amount;
+        all_tokens.extend(tokens.token.clone());
+
+        let conf = state.as_config();
+        let mint_url = tokens
+            .token
+            .iter()
+            .map(|t| &t.mint)
+            .next()
+            .ok_or_else(|| format_err!("cashu tokens not contains mint url"))?;
+
+        if !(conf.mints().contains(&mint_url) && state.as_wallet().contains(&mint_url)?) {
+            let blocker = MintsBlocker::get(&mint_url, state.clone()).await?;
+            if let Some(blocker) = blocker {
+                let b = blocker.lock().await;
+                if b.load(Ordering::SeqCst) {
+                    return Err(format_err!(
+                        "the host of mintUrl {} already blocked: {}",
+                        mint_url.as_ref().host_str().unwrap_or_default(),
+                        mint_url.as_str()
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+
+    // if state.as_limits().cashu_failed_check(ip, &conf.limits) {
+    //     return Ok(None);
+    // }
+
+    let start = std::time::Instant::now();
+    let eventid = eventid.to_owned();
+    let ip = ip.to_owned();
+
+    let proofs = all_tokens
+        .into_iter()
+        .flat_map(|t| t.proofs)
+        .collect::<Vec<_>>();
+    
+    let mint_url = mint_url.ok_or_else(|| format_err!("no mint url"))?;
+    let wallet = state.as_wallet().get_wallet_optional(&mint_url)?.unwrap();
+    let states = wallet.check_proofs(&proofs).await?.states;
+
+    use cashu_wallet::cashu::nuts::State;
+    let unspents = states
+        .iter()
+        .enumerate()
+        .filter(|p| p.1.state == State::Unspent)
+        .map(|p| p.0)
+        .collect::<Vec<_>>();
+
+    let proofs_unspent = proofs
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| unspents.contains(idx))
+        .map(|ip| ip.1)
+        .cloned()
+        .collect();
+
+    let token_v3 = TokenV3Generic::new(
+        mint_url,
+        proofs_unspent,
+        None::<String>,
+        unit.into(),
+    )?;
+
+    let token = cashu_wallet::wallet::Token::TokenV3(token_v3);
+    let fut = async move {
+        let mut txs = vec![];
+        let res = state
+            .as_wallet()
+            .receive_tokens_full_limit_unit(&token, &mut txs, &[])
+            .await;
+        let a = txs.iter().map(|tx| tx.amount()).sum::<u64>();
+        let costms = start.elapsed().as_millis();
+        state
+            .as_metrics()
+            .0
+            .send(crate::Metric {
+                costms: costms as _,
+                amount: a as u32,
+            })
+            .unwrap();
+
+        match res {
+            Ok(_) if a >= total_amount => {
                 info!(
                     "{}'s {:?} tokens receive {} {}ms ok: {}",
                     eventid, ip, price, costms, a,

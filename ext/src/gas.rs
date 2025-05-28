@@ -83,6 +83,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+use std::collections::HashMap;
+use tokio::sync::Mutex;
+
+#[derive(Default)]
+struct IpState {
+    count: u32,
+    cashu_tokens: Vec<String>,
+}
+
 use std::sync::Arc;
 pub struct State {
     config: Config,
@@ -93,6 +102,7 @@ pub struct State {
         tokio::sync::broadcast::Sender<EventInfos>,
         tokio::sync::broadcast::Receiver<EventInfos>,
     ),
+    ip_states: Mutex<HashMap<String, IpState>>, // IP -> (count, cashu_tokens)
 }
 
 impl State {
@@ -106,6 +116,7 @@ impl State {
             limiter: LimiterState::with_capacity(10000),
             metrics: flume::unbounded(),
             events: mpmc,
+            ip_states: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -174,55 +185,94 @@ impl Authorization for Handler {
                     "{} {} event-{} cashu: {}",
                     source_ip, event.kind, id_prefix, cashu,
                 );
+                let mut ip_states = self.state.ip_states.lock().await;
+                let state = ip_states
+                    .entry(source_ip.to_string())
+                    .or_insert_with(IpState::default);
 
-                let price = config.cost_per_event();
-                let res =
-                    cashu::receive_tokens(cashu, &id_prefix, source_ip, price, self.state.clone())
-                        .await;
+                state.count += 1;
+                state.cashu_tokens.push(cashu.clone());
 
-                match res {
-                    Ok(None) => {
-                        info!(
-                            "{} {} cashu receive tokens limited: {:?}",
-                            source_ip, id_prefix, source_ip,
-                        );
+                // Process when reaching 10 events
+                if state.count % 10 == 0 {
+                    debug!(
+                        "{} {} event-{} processing {} cashu tokens (count: {})",
+                        source_ip,
+                        event.kind,
+                        id_prefix,
+                        state.cashu_tokens.len(),
+                        state.count
+                    );
+                    let price = config.cost_per_event();
+                    let res = cashu::receive_tokens2(
+                        state.cashu_tokens.iter().map(|s| s.as_str()).collect(),
+                        &id_prefix,
+                        source_ip,
+                        price,
+                        self.state.clone(),
+                    )
+                    .await;
 
-                        reply = Some(EventReply {
-                            decision: 2,
-                            message: r#""detail":"Rate limit exceeded.""#.to_string().into(),
-                        });
-                    }
-                    Ok(Some(e)) => {
-                        info!(
-                            "{} {} cashu receive tokens ok: {:?}",
-                            source_ip, id_prefix, e,
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "{} {} cashu receive tokens failed: {}",
-                            source_ip, id_prefix, e
-                        );
+                    match res {
+                        Ok(None) => {
+                            info!(
+                                "{} {} cashu receive tokens limited: {:?}",
+                                source_ip, id_prefix, source_ip,
+                            );
 
-                        use cashu_wallet::wallet::ClientError;
-                        use cashu_wallet::UniError;
-                        if config.allow_pending
-                            && match &e {
-                                UniError::Client(ClientError::Mint(_c, _d))
-                                    if _d.contains("proofs already pending") =>
-                                {
-                                    true
-                                }
-                                _ => false,
-                            }
-                        {
-                        } else {
                             reply = Some(EventReply {
                                 decision: 2,
-                                message: e.to_string().into(),
+                                message: r#""detail":"Rate limit exceeded.""#.to_string().into(),
                             });
                         }
+                        Ok(Some(e)) => {
+                            info!(
+                                "{} {} cashu receive tokens ok for {} events: {:?}",
+                                source_ip, id_prefix, state.count, e,
+                            );
+                            // Clear the tokens after successful payment
+                            state.cashu_tokens.clear();
+                        }
+                        Err(e) => {
+                            warn!(
+                                "{} {} cashu receive tokens failed: {}",
+                                source_ip, id_prefix, e
+                            );
+
+                            use cashu_wallet::wallet::ClientError;
+                            use cashu_wallet::UniError;
+                            if config.allow_pending
+                                && match &e {
+                                    UniError::Client(ClientError::Mint(_c, _d))
+                                        if _d.contains("proofs already pending") =>
+                                    {
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            {
+                            } else {
+                                reply = Some(EventReply {
+                                    decision: 2,
+                                    message: e.to_string().into(),
+                                });
+                            }
+                        }
                     }
+                }
+                else {
+                    reply = Some(EventReply {
+                        decision: 3,
+                        message: Some("receive tokens delay".into()),
+                    });
+                    debug!(
+                        "{} {} event-{} processing {} cashu tokens (count: {})",
+                        source_ip,
+                        event.kind,
+                        id_prefix,
+                        state.cashu_tokens.len(),
+                        state.count
+                    );
                 }
             } else if is_cashu_free_kinds {
                 info!(
