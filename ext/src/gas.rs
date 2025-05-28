@@ -261,11 +261,7 @@ impl Authorization for Handler {
                     }
                 }
                 else {
-                    reply = Some(EventReply {
-                        decision: 3,
-                        message: Some("receive tokens delay".into()),
-                    });
-                    debug!(
+                    info!(
                         "{} {} event-{} processing {} cashu tokens (count: {})",
                         source_ip,
                         event.kind,
