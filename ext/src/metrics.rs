@@ -412,7 +412,7 @@ where
             }
         }
 
-        let (ps, fee) = ps?;
+        let (ps, _fee) = ps?;
         after += ps.len();
         let ps = ps.into_extended_with_unit(Some(unit));
         wallet.store().add_proofs(url, &ps).await?;

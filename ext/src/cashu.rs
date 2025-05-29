@@ -443,7 +443,7 @@ where
             .parse()
             .map_err(|e| format_err!(format!("cashu tokens decode: {}", e)))?;
         let tokens = tokens.into_v3()?;
-        
+
         if mint_url.is_none() {
             mint_url = tokens.token.iter().map(|t| t.mint.clone()).next();
             unit = tokens.unit;
@@ -497,7 +497,7 @@ where
         .into_iter()
         .flat_map(|t| t.proofs)
         .collect::<Vec<_>>();
-    
+
     let mint_url = mint_url.ok_or_else(|| format_err!("no mint url"))?;
     let wallet = state.as_wallet().get_wallet_optional(&mint_url)?.unwrap();
     let states = wallet.check_proofs(&proofs).await?.states;
@@ -518,12 +518,7 @@ where
         .cloned()
         .collect();
 
-    let token_v3 = TokenV3Generic::new(
-        mint_url,
-        proofs_unspent,
-        None::<String>,
-        unit.into(),
-    )?;
+    let token_v3 = TokenV3Generic::new(mint_url, proofs_unspent, None::<String>, unit.into())?;
 
     let token = cashu_wallet::wallet::Token::TokenV3(token_v3);
     let fut = async move {

@@ -82,12 +82,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 #[derive(Default)]
-struct IpState {
+struct GlobalState {
     count: u32,
     cashu_tokens: Vec<String>,
 }
@@ -102,7 +100,7 @@ pub struct State {
         tokio::sync::broadcast::Sender<EventInfos>,
         tokio::sync::broadcast::Receiver<EventInfos>,
     ),
-    ip_states: Mutex<HashMap<String, IpState>>, // IP -> (count, cashu_tokens)
+    global_state: Mutex<GlobalState>,
 }
 
 impl State {
@@ -116,7 +114,7 @@ impl State {
             limiter: LimiterState::with_capacity(10000),
             metrics: flume::unbounded(),
             events: mpmc,
-            ip_states: Mutex::new(HashMap::new()),
+            global_state: Mutex::new(GlobalState::default()),
         })
     }
 }
@@ -185,27 +183,28 @@ impl Authorization for Handler {
                     "{} {} event-{} cashu: {}",
                     source_ip, event.kind, id_prefix, cashu,
                 );
-                let mut ip_states = self.state.ip_states.lock().await;
-                let state = ip_states
-                    .entry(source_ip.to_string())
-                    .or_insert_with(IpState::default);
+                let mut global_state = self.state.global_state.lock().await;
 
-                state.count += 1;
-                state.cashu_tokens.push(cashu.clone());
+                global_state.count += 1;
+                global_state.cashu_tokens.push(cashu.clone());
 
                 // Process when reaching 10 events
-                if state.count % 10 == 0 {
+                if global_state.count % 10 == 0 {
                     debug!(
-                        "{} {} event-{} processing {} cashu tokens (count: {})",
+                        "{} {} event-{} Global processing {} cashu tokens (count: {})",
                         source_ip,
                         event.kind,
                         id_prefix,
-                        state.cashu_tokens.len(),
-                        state.count
+                        global_state.cashu_tokens.len(),
+                        global_state.count
                     );
                     let price = config.cost_per_event();
                     let res = cashu::receive_tokens2(
-                        state.cashu_tokens.iter().map(|s| s.as_str()).collect(),
+                        global_state
+                            .cashu_tokens
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect(),
                         &id_prefix,
                         source_ip,
                         price,
@@ -216,7 +215,7 @@ impl Authorization for Handler {
                     match res {
                         Ok(None) => {
                             info!(
-                                "{} {} cashu receive tokens limited: {:?}",
+                                "{} {} Global cashu receive tokens limited: {:?}",
                                 source_ip, id_prefix, source_ip,
                             );
 
@@ -227,15 +226,15 @@ impl Authorization for Handler {
                         }
                         Ok(Some(e)) => {
                             info!(
-                                "{} {} cashu receive tokens ok for {} events: {:?}",
-                                source_ip, id_prefix, state.count, e,
+                                "{} {} Global cashu receive tokens ok for {} events: {:?}",
+                                source_ip, id_prefix, global_state.count, e,
                             );
                             // Clear the tokens after successful payment
-                            state.cashu_tokens.clear();
+                            global_state.cashu_tokens.clear();
                         }
                         Err(e) => {
                             warn!(
-                                "{} {} cashu receive tokens failed: {}",
+                                "{} {} Global cashu receive tokens failed: {}",
                                 source_ip, id_prefix, e
                             );
 
@@ -259,15 +258,14 @@ impl Authorization for Handler {
                             }
                         }
                     }
-                }
-                else {
+                } else {
                     info!(
-                        "{} {} event-{} processing {} cashu tokens (count: {})",
+                        "{} {} event-{} Global processing {} cashu tokens (count: {})",
                         source_ip,
                         event.kind,
                         id_prefix,
-                        state.cashu_tokens.len(),
-                        state.count
+                        global_state.cashu_tokens.len(),
+                        global_state.count
                     );
                 }
             } else if is_cashu_free_kinds {
