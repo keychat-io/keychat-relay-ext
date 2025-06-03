@@ -182,18 +182,83 @@ async fn create_object(
         }
 
         if price > 0 && !js.cashu.is_empty() {
-            let res = cashu::receive_tokens(&js.cashu, &ip, &js.sha256, price, state.clone()).await;
-            match res {
-                Ok(None) => {
-                    info!("{} {} cashu receive tokens limited: {:?}", sa, key, ip,);
-                    status = StatusCode::TOO_MANY_REQUESTS;
-                    return Err((status, r#""detail":"Rate limit exceeded.""#.into()));
-                }
-                Ok(Some(_)) => {}
+            // Parse token to get mint_url
+            let tokens: cashu_wallet::wallet::Token = match js.cashu.parse() {
+                Ok(t) => t,
                 Err(e) => {
-                    status = StatusCode::PAYMENT_REQUIRED;
-                    return Err((status, e.to_string().into()));
+                    warn!("Failed to parse cashu token: {}", e);
+                    return Err((status, format!("Invalid cashu token: {}", e).into()));
                 }
+            };
+            let tokens = match tokens.into_v3() {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Failed to convert token to v3: {}", e);
+                    return Err((status, format!("Invalid token version: {}", e).into()));
+                }
+            };
+
+            let mint_url = match tokens.token.iter().map(|t| &t.mint).next() {
+                Some(url) => url.as_str().to_string(),
+                None => {
+                    warn!("No mint URL found in token");
+                    return Err((status, "No mint URL found in token".into()));
+                }
+            };
+
+            let mut mint_states = state.mint_states.lock().await;
+            let mint_state = mint_states.entry(mint_url.clone()).or_insert_with(MintState::default);
+
+            mint_state.count += 1;
+            mint_state.cashu_tokens.push(js.cashu.clone());
+
+            // Process when reaching 5 events for this mint
+            if mint_state.count % 5 == 0 {
+                debug!(
+                    "{} {} Mint {} processing {} cashu tokens (count: {})",
+                    sa, key, mint_url, mint_state.cashu_tokens.len(), mint_state.count
+                );
+
+                let res = cashu::receive_tokens2(
+                    mint_state.cashu_tokens.iter().map(|s| s.as_str()).collect(),
+                    &key,
+                    &ip,
+                    price,
+                    state.clone(),
+                )
+                .await;
+
+                match res {
+                    Ok(None) => {
+                        info!(
+                            "{} {} Mint {} cashu receive tokens limited: {:?}",
+                            sa, key, mint_url, ip,
+                        );
+                        status = StatusCode::TOO_MANY_REQUESTS;
+                        return Err((status, r#""detail":"Rate limit exceeded.""#.into()));
+                    }
+                    Ok(Some(_)) => {
+                        info!(
+                            "{} {} Mint {} cashu receive tokens ok for {} events",
+                            sa, key, mint_url, mint_state.count,
+                        );
+                        // Clear the tokens after successful payment
+                        mint_state.cashu_tokens.clear();
+                    }
+                    Err(e) => {
+                        warn!(
+                            "{} {} Mint {} cashu receive tokens failed: {}",
+                            sa, key, mint_url, e
+                        );
+                        status = StatusCode::PAYMENT_REQUIRED;
+                        return Err((status, e.to_string().into()));
+                    }
+                }
+            } else {
+                info!(
+                    "{} {} Mint {} processing {} cashu tokens (count: {})",
+                    sa, key, mint_url, mint_state.cashu_tokens.len(), mint_state.count
+                );
             }
         }
     }
@@ -273,12 +338,21 @@ use s3::Bucket;
 use s3::Region;
 
 use std::sync::Arc;
+use tokio::sync::Mutex;
+
+#[derive(Default)]
+struct MintState {
+    count: u32,
+    cashu_tokens: Vec<String>,
+}
+
 pub struct State {
     config: Config,
     bucket: Bucket,
     wallet: UniWallet,
     metrics: MetricsMpmc,
     limiter: LimiterState,
+    mint_states: Mutex<HashMap<String, MintState>>, // mint_url -> state
 }
 
 impl State {
@@ -305,6 +379,7 @@ impl State {
             wallet,
             limiter: LimiterState::with_capacity(10000),
             metrics: flume::unbounded(),
+            mint_states: Mutex::new(HashMap::new()),
         };
 
         Ok(this)

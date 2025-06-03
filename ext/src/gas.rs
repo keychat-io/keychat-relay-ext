@@ -30,6 +30,8 @@ use gas::{EventInfo, EventInfos, EventsRequest};
 pub mod config;
 use config::Config;
 use config::Opts;
+use std::sync::Arc;
+use std::collections::HashMap;
 
 pub mod cashu;
 use cashu::UniWallet;
@@ -85,12 +87,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use tokio::sync::Mutex;
 
 #[derive(Default)]
-struct GlobalState {
+struct MintState {
     count: u32,
     cashu_tokens: Vec<String>,
 }
 
-use std::sync::Arc;
 pub struct State {
     config: Config,
     wallet: UniWallet,
@@ -100,7 +101,7 @@ pub struct State {
         tokio::sync::broadcast::Sender<EventInfos>,
         tokio::sync::broadcast::Receiver<EventInfos>,
     ),
-    global_state: Mutex<GlobalState>,
+    mint_states: Mutex<HashMap<String, MintState>>, 
 }
 
 impl State {
@@ -114,7 +115,7 @@ impl State {
             limiter: LimiterState::with_capacity(10000),
             metrics: flume::unbounded(),
             events: mpmc,
-            global_state: Mutex::new(GlobalState::default()),
+            mint_states: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -183,24 +184,60 @@ impl Authorization for Handler {
                     "{} {} event-{} cashu: {}",
                     source_ip, event.kind, id_prefix, cashu,
                 );
-                let mut global_state = self.state.global_state.lock().await;
 
-                global_state.count += 1;
-                global_state.cashu_tokens.push(cashu.clone());
+                // Parse token to get mint_url
+                let tokens: cashu_wallet::wallet::Token = match cashu.parse() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("Failed to parse cashu token: {}", e);
+                        return Ok(tonic::Response::new(EventReply {
+                            decision: 2,
+                            message: format!("Invalid cashu token: {}", e).into(),
+                        }));
+                    }
+                };
+                let tokens = match tokens.into_v3() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("Failed to convert token to v3: {}", e);
+                        return Ok(tonic::Response::new(EventReply {
+                            decision: 2,
+                            message: format!("Invalid token version: {}", e).into(),
+                        }));
+                    }
+                };
+
+                let mint_url = match tokens.token.iter().map(|t| &t.mint).next() {
+                    Some(url) => url.as_str().to_string(),
+                    None => {
+                        warn!("No mint URL found in token");
+                        return Ok(tonic::Response::new(EventReply {
+                            decision: 2,
+                            message: "No mint URL found in token".to_string().into(),
+                        }));
+                    }
+                };
+
+                let mut mint_states = self.state.mint_states.lock().await;
+                let state = mint_states.entry(mint_url.clone()).or_insert_with(MintState::default);
+
+                state.count += 1;
+                state.cashu_tokens.push(cashu.clone());
 
                 // Process when reaching 10 events
-                if global_state.count % 10 == 0 {
+                if state.count % 10 == 0 {
                     debug!(
-                        "{} {} event-{} Global processing {} cashu tokens (count: {})",
+                        "{} {} event-{} Mint {} processing {} cashu tokens (count: {})",
                         source_ip,
                         event.kind,
                         id_prefix,
-                        global_state.cashu_tokens.len(),
-                        global_state.count
+                        mint_url,
+                        state.cashu_tokens.len(),
+                        state.count
                     );
                     let price = config.cost_per_event();
                     let res = cashu::receive_tokens2(
-                        global_state
+                        state
                             .cashu_tokens
                             .iter()
                             .map(|s| s.as_str())
@@ -226,16 +263,16 @@ impl Authorization for Handler {
                         }
                         Ok(Some(e)) => {
                             info!(
-                                "{} {} Global cashu receive tokens ok for {} events: {:?}",
-                                source_ip, id_prefix, global_state.count, e,
+                                "{} {} Mint {} cashu receive tokens ok for {} events: {:?}",
+                                source_ip, id_prefix, mint_url, state.count, e,
                             );
                             // Clear the tokens after successful payment
-                            global_state.cashu_tokens.clear();
+                            state.cashu_tokens.clear();
                         }
                         Err(e) => {
                             warn!(
-                                "{} {} Global cashu receive tokens failed: {}",
-                                source_ip, id_prefix, e
+                                "{} {} Mint {} cashu receive tokens failed: {}",
+                                source_ip, id_prefix, mint_url, e
                             );
 
                             use cashu_wallet::wallet::ClientError;
@@ -260,12 +297,13 @@ impl Authorization for Handler {
                     }
                 } else {
                     info!(
-                        "{} {} event-{} Global processing {} cashu tokens (count: {})",
+                        "{} {} event-{} Mint {} processing {} cashu tokens (count: {})",
                         source_ip,
                         event.kind,
                         id_prefix,
-                        global_state.cashu_tokens.len(),
-                        global_state.count
+                        mint_url,
+                        state.cashu_tokens.len(),
+                        state.count
                     );
                 }
             } else if is_cashu_free_kinds {
