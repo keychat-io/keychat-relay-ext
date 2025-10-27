@@ -207,7 +207,9 @@ async fn create_object(
             };
 
             let mut mint_states = state.mint_states.lock().await;
-            let mint_state = mint_states.entry(mint_url.clone()).or_insert_with(MintState::default);
+            let mint_state = mint_states
+                .entry(mint_url.clone())
+                .or_insert_with(MintState::default);
 
             mint_state.count += 1;
             mint_state.cashu_tokens.push(js.cashu.clone());
@@ -216,7 +218,11 @@ async fn create_object(
             if mint_state.count % 5 == 0 {
                 debug!(
                     "{} {} Mint {} processing {} cashu tokens (count: {})",
-                    sa, key, mint_url, mint_state.cashu_tokens.len(), mint_state.count
+                    sa,
+                    key,
+                    mint_url,
+                    mint_state.cashu_tokens.len(),
+                    mint_state.count
                 );
 
                 let res = cashu::receive_tokens2(
@@ -257,7 +263,11 @@ async fn create_object(
             } else {
                 info!(
                     "{} {} Mint {} processing {} cashu tokens (count: {})",
-                    sa, key, mint_url, mint_state.cashu_tokens.len(), mint_state.count
+                    sa,
+                    key,
+                    mint_url,
+                    mint_state.cashu_tokens.len(),
+                    mint_state.count
                 );
             }
         }

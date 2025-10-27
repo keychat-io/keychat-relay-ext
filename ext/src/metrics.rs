@@ -260,7 +260,7 @@ where
     let trustu = config
         .mints()
         .first()
-        .ok_or_else(|| format_err!("get fisrt trust mint"))?;
+        .ok_or_else(|| format_err!("get first trust mint"))?;
     let _trustw = wallet.get_wallet(trustu)?;
 
     let balances_for_untrusted_mint = map

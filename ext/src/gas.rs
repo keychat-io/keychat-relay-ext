@@ -30,8 +30,8 @@ use gas::{EventInfo, EventInfos, EventsRequest};
 pub mod config;
 use config::Config;
 use config::Opts;
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub mod cashu;
 use cashu::UniWallet;
@@ -101,7 +101,7 @@ pub struct State {
         tokio::sync::broadcast::Sender<EventInfos>,
         tokio::sync::broadcast::Receiver<EventInfos>,
     ),
-    mint_states: Mutex<HashMap<String, MintState>>, 
+    mint_states: Mutex<HashMap<String, MintState>>,
 }
 
 impl State {
@@ -219,7 +219,9 @@ impl Authorization for Handler {
                 };
 
                 let mut mint_states = self.state.mint_states.lock().await;
-                let state = mint_states.entry(mint_url.clone()).or_insert_with(MintState::default);
+                let state = mint_states
+                    .entry(mint_url.clone())
+                    .or_insert_with(MintState::default);
 
                 state.count += 1;
                 state.cashu_tokens.push(cashu.clone());
@@ -237,11 +239,7 @@ impl Authorization for Handler {
                     );
                     let price = config.cost_per_event();
                     let res = cashu::receive_tokens2(
-                        state
-                            .cashu_tokens
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect(),
+                        state.cashu_tokens.iter().map(|s| s.as_str()).collect(),
                         &id_prefix,
                         source_ip,
                         price,

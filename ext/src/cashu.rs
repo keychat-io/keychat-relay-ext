@@ -499,7 +499,11 @@ where
         .collect::<Vec<_>>();
 
     let mint_url = mint_url.ok_or_else(|| format_err!("no mint url"))?;
-    let wallet = state.as_wallet().get_wallet_optional(&mint_url)?.unwrap();
+    if state.as_wallet().get_wallet_optional(&mint_url)?.is_none() {
+        state.as_wallet().add_mint(mint_url.clone(), false).await?;
+    }
+    let wallet = state.as_wallet().get_wallet(&mint_url)?;
+
     let states = wallet.check_proofs(&proofs).await?.states;
 
     use cashu_wallet::cashu::nuts::State;
