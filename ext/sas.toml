@@ -10,8 +10,10 @@ remote_ip_header = "x-forwarded-for"
 allow_pending = false
 allow_free = false
 
-database = "relay.db"
+database = "relay2.db"
 timeout_ms = 3000
+
+words = "ridge trouble blood satoshi unusual blossom sign dilemma time artefact blur away"
 
 [fee]
 unit="sat"

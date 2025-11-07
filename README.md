@@ -27,3 +27,10 @@ docker logs --tail 100 kcgas -f
 docker run -d --name kcsas -v $PWD:/opt -w /opt --network host debian:12 /opt/keychat-relay-sas -v -c /opt/sas.toml
 docker logs --tail 100 kcsas -f
 ```
+
+##### Test sas locally
+```sh
+cargo build -r
+cd ext && ../target/release/keychat-relay-sas -v -c sas.toml
+curl -X POST -H 'Content-type: application/json' --data '{"sha256": "xxx", "length": 1, "cashu": "xxx"}' 0.0.0.0:3001/v1/object -v
+```

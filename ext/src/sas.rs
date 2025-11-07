@@ -13,15 +13,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use cdk::nuts::Token;
+use cdk::wallet::MultiMintWallet;
 use serde::{Deserialize, Serialize};
 
 pub mod config;
 use config::Config;
 use config::Opts;
+use std::{collections::HashSet, str::FromStr};
 use url::Url;
 
 pub mod cashu;
-use cashu::UniWallet;
 
 pub mod metrics;
 use metrics::LimiterState;
@@ -183,24 +185,17 @@ async fn create_object(
 
         if price > 0 && !js.cashu.is_empty() {
             // Parse token to get mint_url
-            let tokens: cashu_wallet::wallet::Token = match js.cashu.parse() {
+            let tokens: Token = match Token::from_str(&js.cashu) {
                 Ok(t) => t,
                 Err(e) => {
                     warn!("Failed to parse cashu token: {}", e);
                     return Err((status, format!("Invalid cashu token: {}", e).into()));
                 }
             };
-            let tokens = match tokens.into_v3() {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!("Failed to convert token to v3: {}", e);
-                    return Err((status, format!("Invalid token version: {}", e).into()));
-                }
-            };
 
-            let mint_url = match tokens.token.iter().map(|t| &t.mint).next() {
-                Some(url) => url.as_str().to_string(),
-                None => {
+            let mint_url = match tokens.mint_url() {
+                Ok(url) => url.to_string(),
+                Err(_) => {
                     warn!("No mint URL found in token");
                     return Err((status, "No mint URL found in token".into()));
                 }
@@ -212,10 +207,10 @@ async fn create_object(
                 .or_insert_with(MintState::default);
 
             mint_state.count += 1;
-            mint_state.cashu_tokens.push(js.cashu.clone());
+            mint_state.cashu_tokens.insert(js.cashu.clone());
 
             // Process when reaching 5 events for this mint
-            if mint_state.count % 5 == 0 {
+            if mint_state.count % 3 == 0 {
                 debug!(
                     "{} {} Mint {} processing {} cashu tokens (count: {})",
                     sa,
@@ -225,7 +220,7 @@ async fn create_object(
                     mint_state.count
                 );
 
-                let res = cashu::receive_tokens2(
+                let res = cashu::receive_tokens(
                     mint_state.cashu_tokens.iter().map(|s| s.as_str()).collect(),
                     &key,
                     &ip,
@@ -353,13 +348,13 @@ use tokio::sync::Mutex;
 #[derive(Default)]
 struct MintState {
     count: u32,
-    cashu_tokens: Vec<String>,
+    cashu_tokens: HashSet<String>,
 }
 
 pub struct State {
     config: Config,
     bucket: Bucket,
-    wallet: UniWallet,
+    wallet: MultiMintWallet,
     metrics: MetricsMpmc,
     limiter: LimiterState,
     mint_states: Mutex<HashMap<String, MintState>>, // mint_url -> state

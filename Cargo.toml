@@ -7,8 +7,8 @@ members = ["ext", "s3tool"]
 # cashu-wallet = {path = "../cashu-wallet-rs/cashu-wallet"}
 # cashu-wallet = {git = "https://github.com/keychat-io/cashu-wallet-rs.git", tag = "250206"}
 # cashu-wallet-sqlite = {git = "https://github.com/keychat-io/cashu-wallet-rs.git", tag = "250206"}
-cashu-wallet = {git = "https://github.com/keychat-io/cashu-wallet-rs.git", branch = "bugfix2"}
-cashu-wallet-sqlite = {git = "https://github.com/keychat-io/cashu-wallet-rs.git", branch = "bugfix2"}
+# cashu-wallet = {git = "https://github.com/keychat-io/cashu-wallet-rs.git", branch = "bugfix2"}
+# cashu-wallet-sqlite = {git = "https://github.com/keychat-io/cashu-wallet-rs.git", branch = "bugfix2"}
 #
 flume = "0.11"
 futures = "0.3"
@@ -21,7 +21,7 @@ rust-s3 = { version = "0.35.0-alpha.2", default-features = false, features = ["t
 aws-creds = { version = "0.37.0", default-features = false, features = ["rustls-tls"] }
 http = "0.2"
 base64-simd = "0.8.0"
-url="2"
+url = {version = "2.4.0", features = ["serde"]}
 #
 anyhow = "1"
 clap = {version = "3.1.8", features = ["derive"]}

@@ -14,6 +14,7 @@ pub struct Opts {
     pub config: String,
 }
 
+use cashu::MintUrl;
 use tracing::Level;
 impl Opts {
     pub fn log(&self) -> Level {
@@ -85,6 +86,7 @@ pub struct Config {
     #[serde(default)]
     pub kinds: Option<Vec<u64>>,
     pub fee: Fee,
+    pub words: String,
     pub limits: Limits,
     #[serde(default)]
     pub mints_file: Option<PathBuf>,
@@ -93,7 +95,7 @@ impl Config {
     pub fn mints_file(&self) -> &PathBuf {
         self.mints_file.as_ref().unwrap()
     }
-    pub fn mints(&self) -> &[cashu_wallet::Url] {
+    pub fn mints(&self) -> &[MintUrl] {
         &self.fee.mints
     }
     // Cost author to pay per event
@@ -140,7 +142,7 @@ fn default_untrusted_mint_should_transfer() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Fee {
     pub unit: String,
-    pub mints: Vec<cashu_wallet::Url>,
+    pub mints: Vec<MintUrl>,
     pub maxsize: u64,
     pub prices: Vec<Price>,
     #[serde(default = "default_untrusted_mint_balance_limit")]

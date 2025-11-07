@@ -1,89 +1,98 @@
 use std::io::Read;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use cashu_wallet::cashu::util::unix_time;
-use cashu_wallet::store::UnitedStore;
-use cashu_wallet::wallet::AmountHelper;
-use cashu_wallet::wallet::HttpOptions;
-use cashu_wallet::wallet::TokenV3Generic;
-use cashu_wallet::UniError;
-use cashu_wallet::UniErrorFrom;
-use cashu_wallet::UnitedWallet;
-use cashu_wallet::Url;
+use cashu::MintUrl;
+use cdk::cdk_database;
+use cdk::nuts::Token;
+use cdk::wallet::types::WalletKey;
+use cdk::wallet::MultiMintWallet;
+use cdk::wallet::ReceiveOptions;
+use cdk::wallet::WalletBuilder;
+use cdk::Wallet;
+use cdk_common::database::WalletDatabase;
+use cdk_common::util::unix_time;
+use cdk_common::CurrencyUnit;
+use cdk_sqlite::WalletSqliteDatabase;
 
-pub use cashu_wallet_sqlite::LitePool;
-pub use cashu_wallet_sqlite::StoreError;
-pub type UniWallet = UnitedWallet<LitePool>;
+use url::Url;
 
 use crate::config::Config;
 use crate::metrics::StateTrait;
 
-pub async fn crate_cashu_wallet(
-    conf: &Config,
-    _add_mints: bool,
-) -> Result<UniWallet, UniError<StoreError>> {
-    if conf.timeout_ms == 0 {
-        return Err(format_err!("zero ms timeout").into());
-    };
+use keychat_rust_ffi_plugin::api_cashu::MnemonicInfo;
 
+pub async fn crate_cashu_wallet(conf: &Config, add_mints: bool) -> anyhow::Result<MultiMintWallet> {
+    if conf.timeout_ms == 0 {
+        return Err(format_err!("zero ms timeout"));
+    }
     if conf.fee.mints.is_empty() {
-        return Err(format_err!("empty mints").into());
+        return Err(format_err!("empty mints"));
     }
 
-    use cashu_wallet_sqlite::sqlx::{self, sqlite::SqliteConnectOptions};
-    let opts = conf
-        .database
-        .parse::<SqliteConnectOptions>()
-        .map_err(|e| StoreError::Database(e))?
-        .create_if_missing(true)
-        // .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        // prevent other thread open it
-        // .locking_mode(sqlx::sqlite::SqliteLockingMode::Exclusive)
-        // or normal
-        .synchronous(sqlx::sqlite::SqliteSynchronous::Full);
-    info!("SqlitePool open: {:?}", opts);
-    let db = sqlx::sqlite::SqlitePoolOptions::new()
-        // .max_connections(1)
-        .connect_with(opts)
-        .await
-        .map_err(|e| StoreError::Database(e))?;
+    std::env::set_var("RUST_BACKTRACE", "1");
+    let mi = MnemonicInfo::with_words(&conf.words)?;
+    let seed = mi.mnemonic().to_seed("");
+    let localstore: Arc<dyn WalletDatabase<Err = cdk_database::Error> + Send + Sync> =
+        Arc::new(WalletSqliteDatabase::new(&conf.database).await?);
 
-    let http = HttpOptions::new()
-        .connection_verbose(true)
-        .timeout_connect_ms(2000)
-        .timeout_get_ms(conf.timeout_ms)
-        .timeout_swap_ms(conf.timeout_ms)
-        .connection_verbose(true);
+    let mut wallets: Vec<Wallet> = Vec::new();
 
-    let store = LitePool::new(db, Default::default()).await?;
-    let wallet = UnitedWallet::new(store, http);
-    if _add_mints {
-        try_add_mints(&wallet, conf).await?;
+    let mints = localstore.get_mints().await?;
+    if mints.is_empty() {}
+
+    for (mint_url, mint_info) in mints {
+        let mut units = if let Some(mint_info) = mint_info {
+            mint_info.supported_units().into_iter().cloned().collect()
+        } else {
+            vec![CurrencyUnit::Sat]
+        };
+        if units.is_empty() {
+            units.push(CurrencyUnit::Sat);
+        }
+
+        for unit in units {
+            let mint_url_clone = mint_url.clone();
+            let builder = WalletBuilder::new()
+                .mint_url(mint_url_clone.clone())
+                .unit(unit)
+                .localstore(localstore.clone())
+                .seed(&seed);
+
+            let wallet = builder.build()?;
+
+            let wallet_clone = wallet.clone();
+
+            tokio::spawn(async move {
+                if let Err(err) = wallet_clone.get_mint_info().await {
+                    error!(
+                        "Could not get mint quote for {}, {}",
+                        wallet_clone.mint_url, err
+                    );
+                }
+            });
+
+            wallets.push(wallet);
+        }
+    }
+    let multi_mint_wallet = MultiMintWallet::new(localstore, Arc::new(seed), wallets);
+
+    if add_mints {
+        for mint in conf.mints() {
+            let res = multi_mint_wallet
+                .localstore
+                .add_mint(mint.clone(), None)
+                .await;
+            warn!("cashu load mint (plugin): {:?} {:?}", mint, res);
+            res?;
+        }
     }
 
     if let Some(listfile) = &conf.mints_file {
         MintsBlocker::load(listfile).await?;
     }
 
-    Ok(wallet)
-}
-
-async fn try_add_mints<S>(w: &UnitedWallet<S>, conf: &Config) -> Result<(), UniError<S::Error>>
-where
-    S: UnitedStore + Send + Sync + Clone + 'static,
-    UniError<S::Error>: UniErrorFrom<S>,
-{
-    let urls = w.mint_urls()?;
-    for mint in conf
-        .mints()
-        .iter()
-        .filter(|s| urls.iter().all(|u| u != s.as_str()))
-    {
-        let res = w.add_mint(mint.clone(), false).await;
-        warn!("cashu load mint: {} {:?}", mint.as_str(), res);
-        res?;
-    }
-    Ok(())
+    Ok(multi_mint_wallet)
 }
 
 use std::collections::BTreeMap as Map;
@@ -99,16 +108,11 @@ use std::sync::OnceLock;
 static MINTS_BLOCKEDR: OnceLock<Mutex<MintsBlocker>> = OnceLock::new();
 use std::path::PathBuf;
 impl MintsBlocker {
-    async fn get<State>(
-        url: &Url,
-        state: State,
-    ) -> anyhow::Result<Option<Blocker>, UniError<<State::Store as UnitedStore>::Error>>
+    async fn get<State>(url: &Url, state: State) -> anyhow::Result<Option<Blocker>>
     where
         State: StateTrait + Send + 'static,
-        UniError<<State::Store as UnitedStore>::Error>: UniErrorFrom<State::Store>,
     {
         let host = url
-            .as_ref()
             .host_str()
             .ok_or_else(|| format_err!("mint url not contains host"))?;
         let lock = MINTS_BLOCKEDR.get().unwrap();
@@ -143,10 +147,9 @@ impl MintsBlocker {
 
         let _blocker = blocker.lock_owned().await;
         let w = state.as_wallet();
-        let res = w
-            .add_mint_with_units(url.clone(), false, &["sat"], None)
-            .await;
-        warn!("add_mint_with_units {} got: {:?}", url.as_str(), res);
+        let url = MintUrl::from_str(url.as_str())?;
+        let res = w.localstore.add_mint(url.clone(), None).await;
+        warn!("add_mint_with_units {:?} got: {:?}", url, res);
         // if res.is_err() {
         // }
         let _ = lock;
@@ -191,7 +194,6 @@ impl MintsBlocker {
                             mb.blocker = Some(new_blocker(mb.blocked));
                             let host = mb
                                 .url
-                                .as_ref()
                                 .host_str()
                                 .ok_or_else(|| format_err!("the host url is none"))?;
                             map.insert(host.to_owned(), mb);
@@ -228,6 +230,7 @@ impl MintsBlocker {
 
         Ok(())
     }
+
     pub(crate) async fn update_balances(
         balances: impl Iterator<Item = (&str, u64)>,
     ) -> anyhow::Result<usize> {
@@ -237,7 +240,6 @@ impl MintsBlocker {
             for (k, v) in balances {
                 let url = k.parse::<Url>()?;
                 let host = url
-                    .as_ref()
                     .host_str()
                     .ok_or_else(|| format_err!("the host url is none"))?;
 
@@ -287,13 +289,13 @@ pub mod tests {
     #[test]
     fn test_for_mint_host() {
         let url: Url = "https://8333.space".parse().unwrap();
-        assert_eq!(url.as_ref().host_str().unwrap(), "8333.space");
+        assert_eq!(url.host_str().unwrap(), "8333.space");
 
         let url: Url = "https://8333.space:8338".parse().unwrap();
-        assert_eq!(url.as_ref().host_str().unwrap(), "8333.space");
+        assert_eq!(url.host_str().unwrap(), "8333.space");
 
         let url: Url = "https://mint.8333.space:8338".parse().unwrap();
-        assert_eq!(url.as_ref().host_str().unwrap(), "mint.8333.space");
+        assert_eq!(url.host_str().unwrap(), "mint.8333.space");
     }
 }
 
@@ -325,159 +327,83 @@ impl MintRecord {
 }
 
 pub async fn receive_tokens<State>(
-    cashu: &str,
-    eventid: &str,
-    ip: &str,
-    price: u64,
-    state: State,
-) -> Result<Option<()>, UniError<<State::Store as UnitedStore>::Error>>
-where
-    State: StateTrait + Send + 'static + Clone,
-    UniError<<State::Store as UnitedStore>::Error>: UniErrorFrom<State::Store>,
-{
-    let tokens: cashu_wallet::wallet::Token = cashu
-        .parse()
-        .map_err(|e| format_err!(format!("cashu tokens decode: {}", e)))?;
-    let tokens = tokens.into_v3()?;
-    let amount = tokens
-        .token
-        .iter()
-        .map(|a| a.proofs.iter().map(|s| s.amount.to_u64()).sum::<u64>())
-        .sum::<u64>();
-
-    if amount < price {
-        return Err(format_err!("cashu tokens amount not enough: {}/{}", amount, price).into());
-    }
-
-    let conf = state.as_config();
-    let mint_url = tokens
-        .token
-        .iter()
-        .map(|t| &t.mint)
-        .next()
-        .ok_or_else(|| format_err!("cashu tokens not contains mint url"))?;
-
-    // if !conf.mints().contains(&mint_url) {
-    //     return Err(format_err!("unsupport mint url").into());
-    // }
-    if !(conf.mints().contains(&mint_url) && state.as_wallet().contains(&mint_url)?) {
-        let blocker = MintsBlocker::get(&mint_url, state.clone()).await?;
-        if let Some(blocker) = blocker {
-            let b = blocker.lock().await;
-            if b.load(Ordering::SeqCst) {
-                return Err(format_err!(
-                    "the host of mintUrl {} already blocked: {}",
-                    mint_url.as_ref().host_str().unwrap_or_default(),
-                    mint_url.as_str()
-                )
-                .into());
-            }
-        }
-    }
-
-    // if state.as_limits().cashu_failed_check(ip, &conf.limits) {
-    //     return Ok(None);
-    // }
-
-    let start = std::time::Instant::now();
-    let eventid = eventid.to_owned();
-    let ip = ip.to_owned();
-    let fut = async move {
-        let mut txs = vec![];
-        let res = state
-            .as_wallet()
-            .receive_tokens_full_limit_unit(&tokens.into(), &mut txs, &[])
-            .await;
-        let a = txs.iter().map(|tx| tx.amount()).sum::<u64>();
-        let costms = start.elapsed().as_millis();
-        state
-            .as_metrics()
-            .0
-            .send(crate::Metric {
-                costms: costms as _,
-                amount: a as u32,
-            })
-            .unwrap();
-
-        match res {
-            Ok(_) if a >= amount => {
-                info!(
-                    "{}'s {:?} tokens receive {} {}ms ok: {}",
-                    eventid, ip, price, costms, a,
-                );
-            }
-            res => {
-                // state.as_limits().cashu_failed_count(ip, &conf.limits);
-                error!(
-                    "{}'s {:?} tokens receive {} {}ms failed: {:?}",
-                    eventid, ip, price, costms, res
-                );
-                // return res.and_then(|a| Err(format_err!("tokens amount {}<{}", a, price).into()));
-            }
-        }
-    };
-
-    tokio::spawn(fut);
-
-    Ok(Some(()))
-}
-
-pub async fn receive_tokens2<State>(
     cashu: Vec<&str>,
     eventid: &str,
     ip: &str,
     price: u64,
     state: State,
-) -> Result<Option<()>, UniError<<State::Store as UnitedStore>::Error>>
+) -> anyhow::Result<Option<()>>
 where
     State: StateTrait + Send + 'static + Clone,
-    UniError<<State::Store as UnitedStore>::Error>: UniErrorFrom<State::Store>,
 {
     let mut total_amount = 0u64;
-    let mut all_tokens = Vec::new();
-    let mut mint_url: Option<cashu_wallet::Url> = None;
+    let mut all_proofs = Vec::new();
+    let mut mint_url: Option<MintUrl> = None;
     let mut unit = None;
 
     for token_str in cashu {
-        let tokens: cashu_wallet::wallet::Token = token_str
-            .parse()
+        let tokens: Token = Token::from_str(token_str)
             .map_err(|e| format_err!(format!("cashu tokens decode: {}", e)))?;
-        let tokens = tokens.into_v3()?;
 
         if mint_url.is_none() {
-            mint_url = tokens.token.iter().map(|t| t.mint.clone()).next();
-            unit = tokens.unit;
+            mint_url = Some(tokens.mint_url()?);
+            unit = tokens.unit();
         }
 
-        let amount = tokens
-            .token
-            .iter()
-            .map(|a| a.proofs.iter().map(|s| s.amount.to_u64()).sum::<u64>())
-            .sum::<u64>();
+        let this_mint = tokens.mint_url()?;
+        let this_unit = tokens.unit().unwrap_or_default();
+
+        let amount: u64 = tokens.value()?.into();
         if amount < price {
             return Err(format_err!("cashu tokens amount not enough: {}/{}", amount, price).into());
         }
 
         total_amount += amount;
-        all_tokens.extend(tokens.token.clone());
+
+        let wallet = match state
+            .as_wallet()
+            .get_wallet(&WalletKey::new(this_mint.clone(), this_unit.clone()))
+            .await
+        {
+            Some(wallet) => Ok(wallet.clone()),
+            None => {
+                debug!("Wallet does not exist creating..");
+                state
+                    .as_wallet()
+                    .create_and_add_wallet(&this_mint.to_string(), this_unit.clone(), None)
+                    .await
+            }
+        }?;
+
+        let keysets_info = match state
+            .as_wallet()
+            .localstore
+            .get_mint_keysets(this_mint.clone())
+            .await?
+        {
+            Some(keysets_info) => keysets_info,
+            // Hit the keysets endpoint if we don't have the keysets for this Mint
+            None => wallet.get_mint_keysets().await?,
+        };
+        let proofs = tokens.proofs(&keysets_info)?;
+        all_proofs.extend(proofs);
 
         let conf = state.as_config();
-        let mint_url = tokens
-            .token
-            .iter()
-            .map(|t| &t.mint)
-            .next()
-            .ok_or_else(|| format_err!("cashu tokens not contains mint url"))?;
 
-        if !(conf.mints().contains(&mint_url) && state.as_wallet().contains(&mint_url)?) {
-            let blocker = MintsBlocker::get(&mint_url, state.clone()).await?;
+        let has = state
+            .as_wallet()
+            .has(&WalletKey::new(this_mint.clone(), this_unit.clone()))
+            .await;
+        if !(conf.mints().contains(&this_mint) && has) {
+            let url = Url::parse(&this_mint.to_string())?;
+            let blocker = MintsBlocker::get(&url, state.clone()).await?;
             if let Some(blocker) = blocker {
                 let b = blocker.lock().await;
                 if b.load(Ordering::SeqCst) {
                     return Err(format_err!(
                         "the host of mintUrl {} already blocked: {}",
-                        mint_url.as_ref().host_str().unwrap_or_default(),
-                        mint_url.as_str()
+                        url.host_str().unwrap_or_default(),
+                        url.to_string()
                     )
                     .into());
                 }
@@ -493,69 +419,66 @@ where
     let eventid = eventid.to_owned();
     let ip = ip.to_owned();
 
-    let proofs = all_tokens
-        .into_iter()
-        .flat_map(|t| t.proofs)
-        .collect::<Vec<_>>();
-
     let mint_url = mint_url.ok_or_else(|| format_err!("no mint url"))?;
-    if state.as_wallet().get_wallet_optional(&mint_url)?.is_none() {
-        state.as_wallet().add_mint(mint_url.clone(), false).await?;
-    }
-    let wallet = state.as_wallet().get_wallet(&mint_url)?;
+    let unit = unit.unwrap_or_default();
+    let wallet = match state
+        .as_wallet()
+        .get_wallet(&WalletKey::new(mint_url.clone(), unit.clone()))
+        .await
+    {
+        Some(w) => w,
+        None => {
+            state
+                .as_wallet()
+                .localstore
+                .add_mint(mint_url.clone(), None)
+                .await?;
+            state
+                .as_wallet()
+                .create_and_add_wallet(&mint_url.to_string(), unit.clone(), None)
+                .await?
+        }
+    };
 
-    let states = wallet.check_proofs(&proofs).await?.states;
-
-    use cashu_wallet::cashu::nuts::State;
-    let unspents = states
-        .iter()
-        .enumerate()
-        .filter(|p| p.1.state == State::Unspent)
-        .map(|p| p.0)
-        .collect::<Vec<_>>();
-
-    let proofs_unspent = proofs
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| unspents.contains(idx))
-        .map(|ip| ip.1)
-        .cloned()
+    let proofs_state = wallet.check_proofs_spent(all_proofs.clone()).await?;
+    let unspent: cashu::Proofs = all_proofs
+        .into_iter()
+        .zip(proofs_state)
+        .filter_map(|(p, s)| (s.state == cashu::State::Unspent).then_some(p))
         .collect();
 
-    let token_v3 = TokenV3Generic::new(mint_url, proofs_unspent, None::<String>, unit.into())?;
+    let tokens = Token::new(mint_url, unspent, None, unit);
+    let encoded_token = tokens.to_string();
 
-    let token = cashu_wallet::wallet::Token::TokenV3(token_v3);
     let fut = async move {
-        let mut txs = vec![];
         let res = state
             .as_wallet()
-            .receive_tokens_full_limit_unit(&token, &mut txs, &[])
+            .receive(&encoded_token, ReceiveOptions::default())
             .await;
-        let a = txs.iter().map(|tx| tx.amount()).sum::<u64>();
-        let costms = start.elapsed().as_millis();
-        state
-            .as_metrics()
-            .0
-            .send(crate::Metric {
-                costms: costms as _,
-                amount: a as u32,
-            })
-            .unwrap();
-
         match res {
-            Ok(_) if a >= total_amount => {
+            Ok(tx) if *tx.amount.as_ref() <= total_amount => {
+                let costms = start.elapsed().as_millis();
+
                 info!(
-                    "{}'s {:?} tokens receive {} {}ms ok: {}",
-                    eventid, ip, price, costms, a,
+                    "{}'s {:?} tokens receive {}/price {} ms ok: {:?}",
+                    eventid, ip, price, costms, tx.amount,
                 );
+                state
+                    .as_metrics()
+                    .0
+                    .send(crate::Metric {
+                        costms: costms as _,
+                        amount: tx.amount.into(),
+                    })
+                    .unwrap();
             }
             res => {
                 // state.as_limits().cashu_failed_count(ip, &conf.limits);
+                let costms = start.elapsed().as_millis();
                 error!(
-                    "{}'s {:?} tokens receive {} {}ms failed: {:?}",
+                    "{}'s {:?} tokens receive {}/price {} ms failed: {:?}",
                     eventid, ip, price, costms, res
                 );
-                // return res.and_then(|a| Err(format_err!("tokens amount {}<{}", a, price).into()));
             }
         }
     };

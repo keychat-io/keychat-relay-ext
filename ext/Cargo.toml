@@ -19,9 +19,16 @@ path = "src/sas.rs"
 tonic-build = {version = "0.10", features = ["prost"]}
 
 [dependencies]
+keychat_rust_ffi_plugin = { package = "keychat_rust_ffi_plugin", path = "../../keychat_rust_ffi_plugin/rust" }
+cdk-common = {package = "cdk-common", path = "../../cdk/crates/cdk-common"}
+cdk-sqlite = {package = "cdk-sqlite", path = "../../cdk/crates/cdk-sqlite"}
+cdk = {package = "cdk", path = "../../cdk/crates/cdk"}
+cashu = {package = "cashu", path = "../../cdk/crates/cashu"}
+
 prost = "0.12"
 tokio-stream = {version = "0.1.14", features = ["sync"]}
 tonic = "0.10"
+# url = {version = "2.4.0", features = ["serde"]}
 #
 dashmap = "6.0.1"
 parking_lot = "0.12"
@@ -34,8 +41,6 @@ http.workspace = true
 base64-simd.workspace = true
 url.workspace = true
 #
-cashu-wallet.workspace = true
-cashu-wallet-sqlite.workspace = true
 flume.workspace = true
 futures.workspace = true
 tokio.workspace = true

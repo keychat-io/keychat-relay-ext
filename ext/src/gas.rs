@@ -30,11 +30,13 @@ use gas::{EventInfo, EventInfos, EventsRequest};
 pub mod config;
 use config::Config;
 use config::Opts;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 pub mod cashu;
-use cashu::UniWallet;
+use cdk::nuts::Token;
+use cdk::wallet::MultiMintWallet;
 
 pub mod metrics;
 use metrics::LimiterState;
@@ -89,12 +91,12 @@ use tokio::sync::Mutex;
 #[derive(Default)]
 struct MintState {
     count: u32,
-    cashu_tokens: Vec<String>,
+    cashu_tokens: HashSet<String>,
 }
 
 pub struct State {
     config: Config,
-    wallet: UniWallet,
+    wallet: MultiMintWallet,
     metrics: MetricsMpmc,
     limiter: LimiterState,
     events: (
@@ -186,7 +188,7 @@ impl Authorization for Handler {
                 );
 
                 // Parse token to get mint_url
-                let tokens: cashu_wallet::wallet::Token = match cashu.parse() {
+                let tokens: Token = match Token::from_str(cashu) {
                     Ok(t) => t,
                     Err(e) => {
                         warn!("Failed to parse cashu token: {}", e);
@@ -196,20 +198,10 @@ impl Authorization for Handler {
                         }));
                     }
                 };
-                let tokens = match tokens.into_v3() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!("Failed to convert token to v3: {}", e);
-                        return Ok(tonic::Response::new(EventReply {
-                            decision: 2,
-                            message: format!("Invalid token version: {}", e).into(),
-                        }));
-                    }
-                };
 
-                let mint_url = match tokens.token.iter().map(|t| &t.mint).next() {
-                    Some(url) => url.as_str().to_string(),
-                    None => {
+                let mint_url = match tokens.mint_url() {
+                    Ok(url) => url.to_string(),
+                    _ => {
                         warn!("No mint URL found in token");
                         return Ok(tonic::Response::new(EventReply {
                             decision: 2,
@@ -224,10 +216,10 @@ impl Authorization for Handler {
                     .or_insert_with(MintState::default);
 
                 state.count += 1;
-                state.cashu_tokens.push(cashu.clone());
+                state.cashu_tokens.insert(cashu.clone());
 
                 // Process when reaching 10 events
-                if state.count % 10 == 0 {
+                if state.count % 3 == 0 {
                     debug!(
                         "{} {} event-{} Mint {} processing {} cashu tokens (count: {})",
                         source_ip,
@@ -238,7 +230,7 @@ impl Authorization for Handler {
                         state.count
                     );
                     let price = config.cost_per_event();
-                    let res = cashu::receive_tokens2(
+                    let res = cashu::receive_tokens(
                         state.cashu_tokens.iter().map(|s| s.as_str()).collect(),
                         &id_prefix,
                         source_ip,
@@ -273,15 +265,9 @@ impl Authorization for Handler {
                                 source_ip, id_prefix, mint_url, e
                             );
 
-                            use cashu_wallet::wallet::ClientError;
-                            use cashu_wallet::UniError;
                             if config.allow_pending
                                 && match &e {
-                                    UniError::Client(ClientError::Mint(_c, _d))
-                                        if _d.contains("proofs already pending") =>
-                                    {
-                                        true
-                                    }
+                                    e if e.to_string().contains("proofs already pending") => true,
                                     _ => false,
                                 }
                             {
