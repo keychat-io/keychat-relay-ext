@@ -210,7 +210,7 @@ async fn create_object(
             mint_state.cashu_tokens.insert(js.cashu.clone());
 
             // Process when reaching 5 events for this mint
-            if mint_state.count % 3 == 0 {
+            if mint_state.count % 5 == 0 {
                 debug!(
                     "{} {} Mint {} processing {} cashu tokens (count: {})",
                     sa,

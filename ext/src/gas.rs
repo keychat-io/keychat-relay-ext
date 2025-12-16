@@ -219,7 +219,7 @@ impl Authorization for Handler {
                 state.cashu_tokens.insert(cashu.clone());
 
                 // Process when reaching 10 events
-                if state.count % 3 == 0 {
+                if state.count % 10 == 0 {
                     debug!(
                         "{} {} event-{} Mint {} processing {} cashu tokens (count: {})",
                         source_ip,

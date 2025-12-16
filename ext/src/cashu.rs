@@ -440,15 +440,12 @@ where
         }
     };
 
-    let proofs_state = wallet.check_proofs_spent(all_proofs.clone()).await?;
-    let unspent: cashu::Proofs = all_proofs
-        .into_iter()
-        .zip(proofs_state)
-        .filter_map(|(p, s)| (s.state == cashu::State::Unspent).then_some(p))
-        .collect();
-
-    let tokens = Token::new(mint_url, unspent, None, unit);
-    let encoded_token = tokens.to_string();
+    let mint_url_clone = mint_url.clone();
+    let unit_clone = unit.clone();
+    let proofs_for_send = all_proofs.clone();
+    let encoded_token = Token::new(mint_url.clone(), proofs_for_send, None, unit).to_string();
+    let proofs_for_retry = all_proofs.clone();
+    let wallet_cloned = wallet.clone();
 
     let fut = async move {
         let res = state
@@ -472,14 +469,70 @@ where
                     })
                     .unwrap();
             }
-            res => {
-                // state.as_limits().cashu_failed_count(ip, &conf.limits);
+            Err(e) => {
                 let costms = start.elapsed().as_millis();
+                let msg = e.to_string();
                 error!(
                     "{}'s {:?} tokens receive {}/price {} ms failed: {:?}",
-                    eventid, ip, price, costms, res
+                    eventid, ip, price, costms, msg
                 );
+                // if some tokens are already spent, we can check which ones are unspent and try to receive them again
+                if msg.contains("Token Already Spent") {
+                    match wallet_cloned
+                        .check_proofs_spent(proofs_for_retry.clone())
+                        .await
+                    {
+                        Ok(statuses) => {
+                            let unspent: cashu::Proofs = proofs_for_retry
+                                .into_iter()
+                                .zip(statuses)
+                                .filter_map(|(p, s)| {
+                                    (s.state == cashu::State::Unspent).then_some(p)
+                                })
+                                .collect();
+                            if !unspent.is_empty() {
+                                let encoded_token =
+                                    Token::new(mint_url_clone, unspent, None, unit_clone)
+                                        .to_string();
+                                match state
+                                    .as_wallet()
+                                    .receive(&encoded_token, ReceiveOptions::default())
+                                    .await
+                                {
+                                    Ok(tx) if *tx.amount.as_ref() <= total_amount => {
+                                        let costms = start.elapsed().as_millis();
+
+                                        info!(
+                                            "{}'s {:?} tokens retry receive {}/price {} ms ok: {:?}",
+                                            eventid, ip, price, costms, tx.amount,
+                                        );
+                                        state
+                                            .as_metrics()
+                                            .0
+                                            .send(crate::Metric {
+                                                costms: costms as _,
+                                                amount: tx.amount.into(),
+                                            })
+                                            .unwrap();
+                                    }
+                                    Err(e) => {
+                                        let costms = start.elapsed().as_millis();
+                                        error!(
+                                            "{}'s {:?} tokens retry receive {}/price {} ms failed: {:?}",
+                                            eventid, ip, price, costms, e
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Err(es) => {
+                            error!("check_proofs_spent failed: {}", es);
+                        }
+                    }
+                }
             }
+            _ => {}
         }
     };
 
