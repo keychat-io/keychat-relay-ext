@@ -19,11 +19,17 @@ path = "src/sas.rs"
 tonic-build = {version = "0.10", features = ["prost"]}
 
 [dependencies]
-keychat_rust_ffi_plugin = { package = "keychat_rust_ffi_plugin", path = "../../keychat_rust_ffi_plugin/rust" }
-cdk-common = {package = "cdk-common", path = "../../cdk/crates/cdk-common"}
-cdk-sqlite = {package = "cdk-sqlite", path = "../../cdk/crates/cdk-sqlite"}
-cdk = {package = "cdk", path = "../../cdk/crates/cdk"}
-cashu = {package = "cashu", path = "../../cdk/crates/cashu"}
+# keychat_rust_ffi_plugin = { package = "keychat_rust_ffi_plugin", path = "../../keychat_rust_ffi_plugin/rust" }
+# cdk-common = {package = "cdk-common", path = "../../cdk/crates/cdk-common"}
+# cdk-sqlite = {package = "cdk-sqlite", path = "../../cdk/crates/cdk-sqlite"}
+# cdk = {package = "cdk", path = "../../cdk/crates/cdk"}
+# cashu = {package = "cashu", path = "../../cdk/crates/cashu"}
+
+keychat_rust_ffi_plugin = { git = "https://github.com/keychat-io/keychat_rust_ffi_plugin.git", branch = "cdk3" }
+cdk-sqlite = { git = "https://github.com/keychat-io/cdk.git", branch = "kc2", package = "cdk-sqlite" }
+cdk = { git = "https://github.com/keychat-io/cdk.git", branch = "kc2", package = "cdk" }
+cdk-common = { git = "https://github.com/keychat-io/cdk.git", branch = "kc2", package = "cdk-common" }
+cashu = { git = "https://github.com/keychat-io/cdk.git", branch = "kc2", package = "cashu" }
 
 prost = "0.12"
 tokio-stream = {version = "0.1.14", features = ["sync"]}
