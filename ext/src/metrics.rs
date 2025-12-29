@@ -386,6 +386,7 @@ async fn merge_token_by_swap(
         .get_wallet(&WalletKey::new(url.clone(), CurrencyUnit::Sat))
         .await
     {
+        // if relay charge fee, then swap will need fee
         let result = wallet
             .swap(None, SplitTarget::default(), pss, None, false)
             .await?;
@@ -397,43 +398,52 @@ async fn merge_token_by_swap(
     Ok((after, before))
 }
 
+/// this will move all tokens from untrusted mint to trust mint, but will not execute in new version of CDK
+/// because of error 'Token does not match wallet mint'
+/// so this wiil deprecated later and do nothing now
 async fn move_token_by_swap(
-    w: &MultiMintWallet,
-    trust: &Wallet,
-    url: &MintUrl,
-    block: &mut bool,
+    _w: &MultiMintWallet,
+    _trust: &Wallet,
+    _url: &MintUrl,
+    _block: &mut bool,
 ) -> anyhow::Result<(u64, u64)> {
-    let mut before = 0u64;
-    let mut after = 0u64;
-    if let Some(wallet) = w
-        .get_wallet(&WalletKey::new(url.clone(), CurrencyUnit::Sat))
-        .await
-    {
-        // ensure it alive
-        if let Err(err) = wallet.get_mint_keysets().await {
-            error!(
-                "wallet.get_mint_keysets({}) fallback failed: {}",
-                url.to_string(),
-                err
-            );
-            return Err(err.into());
-        }
-        // then send all balance to trust mint
-        *block = false;
-        let ps = wallet.get_unspent_proofs().await?;
-        if *ps.total_amount()?.as_ref() == 0 {
-            let err: anyhow::Error = format_err!("The amount is 0");
-            return Err(err.into());
-        }
-        let prepared_send = wallet
-            .prepare_send(ps.total_amount()?, SendOptions::default())
-            .await?;
-        let tx = wallet.send(prepared_send, None).await?;
-        before = *tx.amount.as_ref();
-        // finally receive in trust mint
-        *block = true;
-        let tx2 = trust.receive(&tx.token, ReceiveOptions::default()).await?;
-        after = *tx2.amount.as_ref();
-    }
-    return Ok((before, after));
+    // let mut before = 0u64;
+    // let mut after = 0u64;
+    // if let Some(wallet) = w
+    //     .get_wallet(&WalletKey::new(url.clone(), CurrencyUnit::Sat))
+    //     .await
+    // {
+    //     // ensure it alive
+    //     if let Err(err) = wallet.get_mint_keysets().await {
+    //         error!(
+    //             "wallet.get_mint_keysets({}) fallback failed: {}",
+    //             url.to_string(),
+    //             err
+    //         );
+    //         return Err(err.into());
+    //     }
+    //     // then send all balance to trust mint
+    //     *block = false;
+    //     let ps = wallet.get_unspent_proofs().await?;
+    //     if *ps.total_amount()?.as_ref() == 0 {
+    //         let err: anyhow::Error = format_err!("The amount is 0");
+    //         return Err(err.into());
+    //     }
+    //     // let prepared_send = wallet
+    //     //     .prepare_send(ps.total_amount()?, SendOptions::default())
+    //     //     .await?;
+    //     // let tx = wallet.send(prepared_send, None).await?;
+    //     // before = *tx.amount.as_ref();
+
+    //     // finally receive in trust mint
+    //     *block = true;
+
+    //     // let tx2 = trust.receive(&tx.token, ReceiveOptions::default()).await?;
+    //     // after = *tx2.amount.as_ref();
+
+    //     // must receive in own wallet to avoid error 'Token does not match wallet mint'
+    //     // let tx2 = wallet.receive(&tx.token, ReceiveOptions::default()).await?;
+    //     // after = *tx2.amount.as_ref();
+    // }
+    return Ok((0, 0));
 }
