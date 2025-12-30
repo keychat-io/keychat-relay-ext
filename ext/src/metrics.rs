@@ -273,7 +273,7 @@ where
     }
 
     for (k, v) in map {
-        let ts = unix_time() * 1000 - 3600 * 1000;
+        let ts = unix_time() - 3600 * 24 * 7; // 7 days
         let txs = wallet.localstore.remove_transactions(ts).await;
 
         info!(
