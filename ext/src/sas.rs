@@ -13,14 +13,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use cdk::nuts::Token;
-use cdk::wallet::MultiMintWallet;
+use cashu::CashuWallet;
 use serde::{Deserialize, Serialize};
 
 pub mod config;
 use config::Config;
 use config::Opts;
-use std::{collections::HashSet, str::FromStr};
 use url::Url;
 
 pub mod cashu;
@@ -53,10 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lis = config.listen;
     let state = State::new(config).await?;
-    info!(
-        "storage authorization server listening on {}, {:?}",
-        lis, state.config
-    );
+    info!("storage authorization server listening on {}", lis);
     let h = Handler::from(state);
 
     let v1 = Router::new()
@@ -113,18 +108,11 @@ async fn put_object(
     ConnectInfo(sa): ConnectInfo<SocketAddr>,
     // AxumState(_state): AxumState<Handler>,
     Path(key): Path<String>,
-    header: HeaderMap,
+    _header: HeaderMap,
     // or bytes
     body: String,
 ) -> impl IntoResponse {
-    info!(
-        "{} put_object {} {}:\n{:?}\n{:?}",
-        sa,
-        key,
-        body.len(),
-        header,
-        body
-    );
+    info!(%sa, %key, bytes = body.len(), "test upload received");
     "Ok"
 }
 
@@ -139,7 +127,7 @@ async fn create_object(
 
     let conf = &state.config;
     let mut ip = sa.ip().to_string();
-    if conf.remote_ip_header.len() >= 1 {
+    if !conf.remote_ip_header.is_empty() {
         let h = header
             .get(&conf.remote_ip_header)
             .ok_or_else(|| "header.get ip none".into())
@@ -184,87 +172,42 @@ async fn create_object(
         }
 
         if price > 0 && !js.cashu.is_empty() {
-            // Parse token to get mint_url
-            let tokens: Token = match Token::from_str(&js.cashu) {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!("Failed to parse cashu token: {}", e);
-                    return Err((status, format!("Invalid cashu token: {}", e).into()));
-                }
-            };
-
-            let mint_url = match tokens.mint_url() {
-                Ok(url) => url.to_string(),
-                Err(_) => {
-                    warn!("No mint URL found in token");
-                    return Err((status, "No mint URL found in token".into()));
-                }
-            };
-
-            let mut mint_states = state.mint_states.lock().await;
-            let mint_state = mint_states
-                .entry(mint_url.clone())
-                .or_insert_with(MintState::default);
-
-            mint_state.count += 1;
-            mint_state.cashu_tokens.insert(js.cashu.clone());
-
-            // Process when reaching 5 events for this mint
-            if mint_state.count % 5 == 0 {
-                debug!(
-                    "{} {} Mint {} processing {} cashu tokens (count: {})",
-                    sa,
-                    key,
-                    mint_url,
-                    mint_state.cashu_tokens.len(),
-                    mint_state.count
-                );
-
-                let res = cashu::receive_tokens(
-                    mint_state.cashu_tokens.iter().map(|s| s.as_str()).collect(),
-                    &key,
-                    &ip,
-                    price,
-                    state.clone(),
-                )
-                .await;
-
-                match res {
-                    Ok(None) => {
-                        info!(
-                            "{} {} Mint {} cashu receive tokens limited: {:?}",
-                            sa, key, mint_url, ip,
-                        );
-                        status = StatusCode::TOO_MANY_REQUESTS;
-                        return Err((status, r#""detail":"Rate limit exceeded.""#.into()));
-                    }
-                    Ok(Some(_)) => {
-                        info!(
-                            "{} {} Mint {} cashu receive tokens ok for {} events",
-                            sa, key, mint_url, mint_state.count,
-                        );
-                        // Clear the tokens after successful payment
-                        mint_state.cashu_tokens.clear();
-                    }
-                    Err(e) => {
-                        warn!(
-                            "{} {} Mint {} cashu receive tokens failed: {}",
-                            sa, key, mint_url, e
-                        );
-                        status = StatusCode::PAYMENT_REQUIRED;
-                        return Err((status, e.to_string().into()));
-                    }
-                }
-            } else {
-                info!(
-                    "{} {} Mint {} processing {} cashu tokens (count: {})",
-                    sa,
-                    key,
-                    mint_url,
-                    mint_state.cashu_tokens.len(),
-                    mint_state.count
-                );
+            let parsed = cashu::parse_token(&js.cashu, &conf.input)
+                .map_err(|_| (StatusCode::PAYMENT_REQUIRED, "invalid cashu token".into()))?;
+            // SAS keeps the original size-based sat contract. Stamp is gas only.
+            if parsed.unit.to_string() != "sat" || !conf.mints().contains(&parsed.mint) {
+                return Err((
+                    StatusCode::PAYMENT_REQUIRED,
+                    "payment mint/unit is not accepted".into(),
+                ));
             }
+            let mint = parsed.mint.to_string();
+            let start = std::time::Instant::now();
+            if state.limiter.cashu_failed_check(&ip, &conf.limits) {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "payment rate limit exceeded".into(),
+                ));
+            }
+            let net = state
+                .wallet
+                .pay(
+                    format!("{key}-{}", js.length),
+                    parsed,
+                    price,
+                    conf.timeout_ms,
+                )
+                .await
+                .map_err(|_| {
+                    state.limiter.cashu_failed_count(&ip, &conf.limits);
+                    (StatusCode::PAYMENT_REQUIRED, "payment unconfirmed".into())
+                })?;
+            let _ = state.metrics.0.send(Metric {
+                costms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                amount: net,
+                mint,
+                unit: "sat".into(),
+            });
         }
     }
 
@@ -303,7 +246,7 @@ async fn create_object(
         .await
         .unwrap();
 
-    info!("{} {} {} PresignedUrl: {}", key, js.length, sa, url);
+    info!("{} {} {} upload authorized", key, js.length, sa);
 
     let mut uri = Url::parse(&url).unwrap();
     uri.set_query(None);
@@ -343,28 +286,18 @@ use s3::Bucket;
 use s3::Region;
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
-
-#[derive(Default)]
-struct MintState {
-    count: u32,
-    cashu_tokens: HashSet<String>,
-}
-
 pub struct State {
     config: Config,
-    bucket: Bucket,
-    wallet: MultiMintWallet,
+    bucket: Box<Bucket>,
+    wallet: Arc<CashuWallet>,
     metrics: MetricsMpmc,
     limiter: LimiterState,
-    mint_states: Mutex<HashMap<String, MintState>>, // mint_url -> state
 }
 
 impl State {
     async fn new(config: Config) -> anyhow::Result<Self> {
-        let wallet = cashu::crate_cashu_wallet(&config, true).await?;
-
-        dotenvy::dotenv().expect(".env file not found");
+        let _ = dotenvy::dotenv();
+        let wallet = CashuWallet::new(&config, false).await?;
         let bucket = std::env::var("AWS_BUCKET").unwrap();
         let region = Region::from_env("AWS_REGION", "AWS_ENDPOINT_URL".into())?;
 
@@ -384,7 +317,6 @@ impl State {
             wallet,
             limiter: LimiterState::with_capacity(10000),
             metrics: flume::unbounded(),
-            mint_states: Mutex::new(HashMap::new()),
         };
 
         Ok(this)
@@ -400,6 +332,75 @@ impl From<State> for Handler {
     fn from(value: State) -> Self {
         Self {
             state: Arc::new(value),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cdk::nuts::CurrencyUnit;
+    #[tokio::test]
+    async fn object_contract_accepts_sat_and_rejects_stamp() {
+        for unit in [CurrencyUnit::Sat, CurrencyUnit::custom("stamp")] {
+            let (wallet, mint, url, _dir, server) = cashu::tests::fixture(unit.clone(), 0).await;
+            let mut config: Config = toml::from_str(include_str!("../sas.toml")).unwrap();
+            config.fee.mints = vec![url.clone()];
+            config.remote_ip_header.clear();
+            let credentials = Credentials::new(
+                Some("component-test"),
+                Some("component-test-only"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let bucket = Bucket::new(
+                "component-test",
+                Region::Custom {
+                    region: "test".into(),
+                    endpoint: "https://object.invalid".into(),
+                },
+                credentials,
+            )
+            .unwrap()
+            .with_path_style();
+            let state = Arc::new(State {
+                config,
+                bucket,
+                wallet,
+                metrics: flume::unbounded(),
+                limiter: LimiterState::with_capacity(10),
+            });
+            let info = get_info(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                AxumState(Handler {
+                    state: state.clone(),
+                }),
+            )
+            .await;
+            assert_eq!(info.0["unit"], "sat");
+            let object = CreateObject {
+                sha256: base64_simd::STANDARD.encode_to_string([7; 32]),
+                length: 1,
+                cashu: mint.token(&url, 1),
+            };
+            let response = create_object(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                AxumState(Handler { state }),
+                HeaderMap::new(),
+                Json(object),
+            )
+            .await;
+            if unit == CurrencyUnit::Sat {
+                if let Err((status, message)) = &response {
+                    panic!("SAS test response: {status}: {message}");
+                }
+                assert_eq!(response.unwrap().into_response().status(), StatusCode::OK);
+            } else {
+                assert_eq!(response.err().unwrap().0, StatusCode::PAYMENT_REQUIRED);
+            }
+            server.abort();
         }
     }
 }

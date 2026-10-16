@@ -1,39 +1,41 @@
-# Enable pay to relay
+# Template only: confirm the production sat mint allow-list and price separately.
+# Supply a newly provisioned, persistent BIP-39 mnemonic through a protected
+# service environment. Never reuse the previously published sample mnemonic.
+relay_scope = "wss://relay.keychat.io"
+kinds = [4, 1059]
 enabled = true
-
-# listen = "0.0.0.0:2002"
-listen = "0.0.0.0:2001"
-
-# remote_ip_header = "x-forwarded-for"
-
-allow_pending = false
+listen = "127.0.0.1:2001"
+database = "gas.cdk018.sqlite"
+seed_env = "KEYCHAT_CASHU_MNEMONIC"
+timeout_ms = 10000
 allow_free = false
-
-database = "relay2.db"
-timeout_ms = 3000
-
-words = "ridge trouble blood satoshi unusual blossom sign dilemma time artefact blur away"
+allow_pending = false
 
 [fee]
-unit="sat"
-maxsize=104857600
-mints = [
-  "https://8333.space:3338",
-]
-
-# cost_per_event = 1
-# 10m
+unit = "sat"
+mints = ["https://8333.space:3338/", "https://mint.keychat.io/"]
+maxsize = 104857600
 [[fee.prices]]
-min=0
-max=10485760
-price=1
-
+min = 0
+max = 10485760
+price = 1
 [[fee.prices]]
-min=10485760
-max=104857600
-price=2
+min = 10485760
+max = 104857600
+price = 2
+
+[stamp]
+enabled = true
+mint = "https://stamp.keychat.io/"
+unit = "stamp"
+cost_per_event = 1
+kinds = [4, 1059]
+
+[input]
+max_token_bytes = 65536
+max_proofs = 128
+max_amount = 1000000
 
 [limits.cashu_failed]
-secs=600
-allow=3
-
+secs = 60
+allow = 20

@@ -1,36 +1,22 @@
-# keychat-relay-gas: ext/src/gas.rs
+# keychat-relay-ext
 
-Pay to nostr-rs-relay with cashu by grpc authorization server
+`keychat-relay-gas` authorizes paid Nostr events through the existing EventAdmit
+gRPC API. It accepts configured legacy sat or stamp rules and permits a paid event
+only after confirmed receipt using upstream CDK 0.18. The wallet and durable
+per-event payment records use one new SQLite database owned by one process.
 
-##### Tip: rust nightly required
+`keychat-relay-sas` retains the storage authorization HTTP API and sat size prices.
+It does not accept stamp. Both services use strict mint allow-lists and protected
+persistent seed configuration; the checked-in TOML files contain no secrets.
 
-# keychat-relay-sas: ext/src/sas.rs
+Build and verify with:
 
-Pay to api with cashu by storage authorization server
-
-##### Nginx conf
-```ini
-location ^~/api/ {
-               proxy_pass  http://127.0.0.1:3001/;
-               proxy_set_header Host $proxy_host;
-               proxy_set_header X-Real-IP $remote_addr;
-               proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-               proxy_http_version 1.1;
-           }
-```
-
-##### Docker
 ```sh
-docker run -d --name kcgas -v $PWD:/opt --network host debian:12 /opt/keychat-relay-gas -v -c /opt/gas.toml
-docker logs --tail 100 kcgas -f
-
-docker run -d --name kcsas -v $PWD:/opt -w /opt --network host debian:12 /opt/keychat-relay-sas -v -c /opt/sas.toml
-docker logs --tail 100 kcsas -f
+cargo check --workspace --all-targets --locked
+cargo test -p keychat-relay-ext --locked
 ```
 
-##### Test sas locally
-```sh
-cargo build -r
-cd ext && ../target/release/keychat-relay-sas -v -c sas.toml
-curl -X POST -H 'Content-type: application/json' --data '{"sha256": "xxx", "length": 1, "cashu": "xxx"}' 0.0.0.0:3001/v1/object -v
-```
+Tests use loopback-only temporary mints and generated test proofs. Read the
+[receiver and data cutover guide](docs/cdk018-cutover.md) before provisioning a
+service. Existing CDK 0.11, cashu-wallet SQLite or Redb databases must be preserved
+with their matching tools and must never be opened by this new runtime.

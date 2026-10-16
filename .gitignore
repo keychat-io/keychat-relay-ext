@@ -14,3 +14,11 @@ s3tool/x.*
 
 
 
+# Wallet ownership markers are backed up with their databases, never committed.
+**.cdk018.sqlite.owner
+# SQLite sidecars contain the same sensitive wallet data as the main database.
+**.sqlite-wal
+**.sqlite-shm
+**.sqlite3-wal
+**.sqlite3-shm
+.DS_Store
