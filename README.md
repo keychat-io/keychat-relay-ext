@@ -6,7 +6,8 @@ only after confirmed receipt using upstream CDK 0.18. The wallet and durable
 per-event payment records use one new SQLite database owned by one process.
 
 `keychat-relay-sas` retains the storage authorization HTTP API and sat size prices.
-It does not accept stamp. Both services use strict mint allow-lists and protected
+It does not accept stamp. Explicit `allow_free = true` also permits zero-priced
+SAS size ranges; gas still rejects `allow_free`. Both services use strict mint allow-lists and protected
 persistent seed configuration; the checked-in TOML files contain no secrets.
 
 Build and verify with:

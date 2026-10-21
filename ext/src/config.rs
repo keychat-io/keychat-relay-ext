@@ -85,8 +85,8 @@ impl Config {
         ensure!(!self.fee.prices.is_empty(), "prices is empty");
         for (i, p) in self.fee.prices.iter().enumerate() {
             ensure!(
-                p.max > p.min && p.price > 0,
-                "invalid price range or zero price"
+                p.max > p.min && (p.price > 0 || self.allow_free),
+                "invalid price range or zero price without allow_free"
             );
             ensure!(
                 if i == 0 {
@@ -297,6 +297,25 @@ mod tests {
             .is_err());
         c.stamp.as_mut().unwrap().unit = "sat".into();
         assert!(c.validate().is_err());
+    }
+    #[test]
+    fn free_sas_prices_require_opt_in_and_cannot_enable_free_gas() {
+        let mut c: Config = toml::from_str(include_str!("../sas.toml")).unwrap();
+        c.fee.prices.truncate(1);
+        c.fee.prices[0].price = 0;
+        assert!(c.validate().is_err());
+        c.allow_free = true;
+        c.validate().unwrap();
+        for size in [1, 10485760, 10485761, 104857600] {
+            assert_eq!(c.compute_price(size).unwrap(), 0);
+        }
+        assert!(c.compute_price(104857601).is_err());
+        let mut gas = gas_config();
+        gas.fee.prices[0].price = 0;
+        assert!(gas.validate().is_err());
+        gas.allow_free = true;
+        gas.validate().unwrap();
+        assert!(gas.validate_gas().is_err());
     }
     #[test]
     fn sas_size_prices_and_sat_are_preserved() {
