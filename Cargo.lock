@@ -1925,6 +1925,7 @@ dependencies = [
  "flume",
  "fs2",
  "futures",
+ "hmac",
  "http 0.2.12",
  "parking_lot",
  "prost",
