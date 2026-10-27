@@ -25,6 +25,7 @@ cdk-sqlite = { version = "=0.18.0", default-features = false, features = ["walle
 cdk-http-client = { version = "=0.18.0", default-features = false }
 bip39 = "2.2"
 sha2 = "0.10"
+hmac = "0.12"
 fs2 = "0.4"
 zeroize = "1"
 
