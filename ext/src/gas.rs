@@ -104,7 +104,13 @@ impl Handler {
             if !conf.enabled {
                 return deny("payment admission unavailable");
             }
-            match self.state.wallet.status(id.clone(), conf.timeout_ms).await {
+            let status = match self.state.wallet.admission_status(&id).await {
+                Ok(Some(false)) if !conf.batch.enabled => {
+                    self.state.wallet.status(id.clone(), conf.timeout_ms).await
+                }
+                local => local,
+            };
+            match status {
                 Ok(Some(true)) => {
                     return EventReply {
                         decision: 1,
@@ -133,6 +139,22 @@ impl Handler {
             let ip = request.ip_addr();
             if self.state.limiter.cashu_failed_check(ip, &conf.limits) {
                 return deny("payment rate limit exceeded");
+            }
+            if conf.batch.enabled {
+                if self
+                    .state
+                    .wallet
+                    .enqueue(id, parsed, price, &conf.batch)
+                    .await
+                    .is_err()
+                {
+                    self.state.limiter.cashu_failed_count(ip, &conf.limits);
+                    return deny("payment admission unavailable; retry the same event");
+                }
+                return EventReply {
+                    decision: 1,
+                    message: None,
+                };
             }
             let start = std::time::Instant::now();
             match self
@@ -243,6 +265,7 @@ mod tests {
         for unit in [CurrencyUnit::Sat, CurrencyUnit::custom("stamp")] {
             let (wallet, mint, url, _dir, server) = cashu::tests::fixture(unit.clone(), 0).await;
             let mut config: Config = toml::from_str(include_str!("../gas.toml")).unwrap();
+            config.batch.enabled = false;
             config.fee.mints = vec![url.clone()];
             config.stamp.as_mut().unwrap().mint = url.clone();
             let state = Arc::new(State {
@@ -283,6 +306,126 @@ mod tests {
             server.abort();
         }
     }
+    #[tokio::test]
+    async fn batched_handler_permits_new_and_replay_during_stalled_swap_and_notifies_subscribers() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        let (wallet, mint, url, _dir, server) = cashu::tests::fixture(CurrencyUnit::Sat, 0).await;
+        let mut config: Config = toml::from_str(include_str!("../gas.toml")).unwrap();
+        config.batch.size = 1;
+        config.fee.mints = vec![url.clone()];
+        let worker = wallet.start_batch_worker(config.batch.clone());
+        let h = Handler {
+            state: Arc::new(State {
+                config,
+                wallet,
+                limiter: LimiterState::with_capacity(10),
+                metrics: flume::unbounded(),
+                events: tokio::sync::broadcast::channel(10),
+            }),
+        };
+        let mut sub = h.state.events.0.subscribe();
+        mint.mode.store(8, Ordering::SeqCst);
+        let first = request(4, Some(mint.token(&url, 1)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if h.event_admit(tonic::Request::new(first.clone()))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .decision
+                    == 1
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            while mint.requests.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        sub.try_recv().unwrap();
+        let mut second = request(4, Some(mint.token(&url, 1)));
+        second.event.as_mut().unwrap().id = vec![8; 32];
+        tokio::time::timeout(Duration::from_millis(500), async {
+            for r in [request(4, None), second] {
+                let reply = h
+                    .event_admit(tonic::Request::new(r))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                assert_eq!(reply.decision, 1);
+                sub.try_recv().unwrap();
+            }
+        })
+        .await
+        .expect("Handler admission waited for stalled wallet network");
+        assert_eq!(mint.requests.load(Ordering::SeqCst), 1);
+        mint.mode.store(0, Ordering::SeqCst);
+        mint.release_swap.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            h.state.wallet.confirmed(&"07".repeat(32)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        worker.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn disabled_batch_mode_replays_terminal_accepted_failure_without_new_charge() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        let (wallet, mint, url, _dir, server) = cashu::tests::fixture(CurrencyUnit::Sat, 0).await;
+        let mut config: Config = toml::from_str(include_str!("../gas.toml")).unwrap();
+        config.batch.size = 1;
+        config.fee.mints = vec![url.clone()];
+        let worker = wallet.start_batch_worker(config.batch.clone());
+        let mut h = Handler {
+            state: Arc::new(State {
+                config,
+                wallet,
+                limiter: LimiterState::with_capacity(10),
+                metrics: flume::unbounded(),
+                events: tokio::sync::broadcast::channel(10),
+            }),
+        };
+        let mut bad = mint.proof(1);
+        bad.c = mint.proof(1).c;
+        let token = cdk::nuts::Token::new(url, vec![bad], None, CurrencyUnit::Sat).to_string();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if h.admit(&request(4, Some(token.clone()))).await.decision == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            loop {
+                if h.state
+                    .wallet
+                    .initialize_batch(&config::BatchConfig::default())
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        worker.abort();
+        Arc::get_mut(&mut h.state).unwrap().config.batch.enabled = false;
+        let attempts = mint.requests.load(Ordering::SeqCst);
+        assert_eq!(h.admit(&request(4, None)).await.decision, 1);
+        assert_eq!(mint.requests.load(Ordering::SeqCst), attempts);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn malformed_missing_disabled_and_pending_bypass_are_denied() {
         let (wallet, _mint, _url, _dir, server) = cashu::tests::fixture(CurrencyUnit::Sat, 0).await;

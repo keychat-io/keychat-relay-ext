@@ -33,6 +33,9 @@ pub enum CrashPoint {
     AfterOutputs,
     AfterCompletedTx,
     BeforePaid,
+    AfterManifest,
+    AfterAssignment,
+    BeforeMemberPaid,
 }
 pub struct FaultDatabase {
     inner: DynDatabase,
@@ -304,13 +307,25 @@ impl WalletDatabase<Error> for FaultDatabase {
     ) -> Result<(), Error> {
         if primary_namespace == super::NS && secondary_namespace != "proof-claims" {
             let receipt: super::Receipt = serde_json::from_slice(value)?;
-            if receipt.paid && self.hit(CrashPoint::BeforePaid) {
+            if (receipt.paid && self.hit(CrashPoint::BeforePaid))
+                || (receipt.paid
+                    && receipt.queued_at.is_some()
+                    && self.hit(CrashPoint::BeforeMemberPaid))
+            {
                 return Err(Self::crash());
             }
         }
         self.inner
             .kv_write(primary_namespace, secondary_namespace, key, value)
             .await?;
+        if primary_namespace == super::NS && secondary_namespace != "proof-claims" {
+            let receipt: super::Receipt = serde_json::from_slice(value)?;
+            if (receipt.members.is_some() && self.hit(CrashPoint::AfterManifest))
+                || (receipt.batch_id.is_some() && self.hit(CrashPoint::AfterAssignment))
+            {
+                return Err(Self::crash());
+            }
+        }
         if primary_namespace == super::NS
             && ((secondary_namespace == "proof-claims" && self.hit(CrashPoint::FirstClaim))
                 || (secondary_namespace != "proof-claims" && self.hit(CrashPoint::Intent)))

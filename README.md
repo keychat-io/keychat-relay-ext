@@ -1,9 +1,12 @@
 # keychat-relay-ext
 
 `keychat-relay-gas` authorizes paid Nostr events through the existing EventAdmit
-gRPC API. It accepts configured legacy sat or stamp rules and permits a paid event
-only after confirmed receipt using upstream CDK 0.18. The wallet and durable
-per-event payment records use one new SQLite database owned by one process.
+gRPC API. It accepts configured legacy sat or stamp rules. The gas template enables
+fast durable ticket reservation, then one merged CDK 0.18 receive per ten events
+or a 30-second tail flush. A permit can precede collection. Omitted batching
+configuration preserves synchronous confirmed-receipt admission. The wallet and
+queue use one new SQLite database owned by one process. Read the
+[batch admission design](docs/gas-batch-admission.md) for bounds and recovery.
 
 `keychat-relay-sas` retains the storage authorization HTTP API and sat size prices.
 It does not accept stamp. Explicit `allow_free = true` also permits zero-priced

@@ -39,3 +39,14 @@ max_amount = 1000000
 [limits.cashu_failed]
 secs = 60
 allow = 20
+
+# Fast local admission; collection uses one merged receive per bucket.
+[batch]
+enabled = true
+size = 10
+max_wait_seconds = 30
+max_pending = 100
+# Only the configured Stamp wallet gets this HTTP budget. Legacy sat and SAS
+# keep the CDK default. One serialized settlement worker bounds concurrency.
+stamp_requests_per_minute = 120
+stamp_burst = 10

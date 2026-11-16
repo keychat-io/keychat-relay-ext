@@ -41,6 +41,9 @@ pub struct CashuWallet {
     scope: String,
     seed: Zeroizing<[u8; 64]>,
     _lock: File,
+    registration: Mutex<batch::Registration>,
+    batch_wake: tokio::sync::Notify,
+    input_limits: InputLimits,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Receipt {
@@ -62,6 +65,14 @@ pub struct Receipt {
     original: Option<OriginalReceive>,
     #[serde(default)]
     recovery_attempted: bool,
+    #[serde(default)]
+    queued_at: Option<u64>,
+    #[serde(default)]
+    batch_id: Option<String>,
+    #[serde(default)]
+    members: Option<Vec<String>>,
+    #[serde(default)]
+    failure: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct OriginalReceive {
@@ -248,12 +259,27 @@ impl CashuWallet {
         }
         let mut wallets = BTreeMap::new();
         for (mint, unit) in rules {
-            let w = WalletBuilder::new()
+            let mut builder = WalletBuilder::new()
                 .mint_url(mint.clone())
                 .unit(unit.clone())
                 .seed(*seed)
-                .localstore(db.clone())
-                .build()?;
+                .localstore(db.clone());
+            if gas
+                && conf.batch.enabled
+                && conf
+                    .stamp
+                    .as_ref()
+                    .is_some_and(|s| s.enabled && s.mint == mint && s.unit == unit.to_string())
+            {
+                builder = builder.with_rate_limiting_config(
+                    cdk::wallet::RateLimitConfig::try_new(
+                        conf.batch.stamp_burst,
+                        conf.batch.stamp_requests_per_minute,
+                    )
+                    .ok_or_else(|| anyhow!("invalid stamp rate budget"))?,
+                );
+            }
+            let w = builder.build()?;
             wallets.insert((mint.to_string(), unit.to_string()), w);
         }
         let this = Arc::new(Self {
@@ -264,11 +290,31 @@ impl CashuWallet {
             scope: hash(&[scope.as_bytes()]),
             seed,
             _lock: lock,
+            registration: Mutex::new(batch::Registration::default()),
+            batch_wake: tokio::sync::Notify::new(),
+            input_limits: conf.input.clone(),
         });
         // Reconcile only known intents. No background balance merges, outgoing
         // payments, old database upgrades or untrusted mint discovery.
+        if gas {
+            this.initialize_batch(&conf.batch).await?;
+            if conf.batch.enabled {
+                this.start_batch_worker(conf.batch.clone());
+                return Ok(this);
+            }
+        }
         let keys = this.db.kv_list(NS, &this.scope).await?;
         for event in keys {
+            if gas
+                && this
+                    .load(&event)
+                    .await?
+                    .is_some_and(|r| r.queued_at.is_some() || r.members.is_some())
+            {
+                // initialize_batch already required all async work to be drained.
+                // Preserve its permits/history without reopening old operations.
+                continue;
+            }
             match this.status(event.clone(), conf.timeout_ms).await {
                 Ok(Some(true)) => debug!(event_id=%event, "receipt confirmed during startup"),
                 _ => warn!(event_id=%event, "receipt unresolved during startup; no permit granted"),
@@ -406,6 +452,7 @@ impl CashuWallet {
                 .is_some_and(|net| net >= price),
             "net payment amount is insufficient"
         );
+        let _registration = self.registration.lock().await;
         let ys = canonical_ys(&proofs)?;
         for y in &ys {
             let key = hash(&[parsed.mint.to_string().as_bytes(), y.as_bytes()]);
@@ -414,31 +461,17 @@ impl CashuWallet {
                 "proof is already bound to an event"
             );
         }
-        let fingerprint = hash(&[parsed.mint.to_string().as_bytes(), ys.join(",").as_bytes()]);
-        let canonical =
-            Token::new(parsed.mint.clone(), proofs, None, parsed.unit.clone()).to_string();
-        let mut r = Receipt {
-            event: event.into(),
-            fingerprint,
-            mint: parsed.mint.clone(),
-            unit: parsed.unit.clone(),
-            input_ys: ys,
-            amount: parsed.amount,
+        let mut r = self.original_receipt(
+            event.into(),
+            parsed.mint,
+            parsed.unit,
+            proofs,
+            parsed.amount,
             price,
-            paid: false,
-            transaction_id: None,
-            recovery_outputs: None,
-            original: None,
-            recovery_attempted: false,
-        };
-        let binding = self.original_binding(&r, &canonical);
-        r.original = Some(OriginalReceive {
-            scope: self.scope.clone(),
-            token: canonical,
-            binding,
-        });
+        )?;
         self.save(&r).await?;
         self.claim_original(&r).await?;
+        drop(_registration);
         self.receive_original(&mut r).await
     }
     fn original_binding(&self, r: &Receipt, token: &str) -> String {
@@ -501,6 +534,9 @@ impl CashuWallet {
         Ok(proofs)
     }
     async fn claim_original(&self, r: &Receipt) -> anyhow::Result<()> {
+        if r.members.is_some() {
+            return self.validate_batch(r).await;
+        }
         // Check the whole set first. Partial writes can then be completed after
         // restart, but another event's claim is never overwritten.
         for y in &r.input_ys {
@@ -536,7 +572,7 @@ impl CashuWallet {
         let net: u64 = w
             .receive(&original.token, opts)
             .await
-            .map_err(|_| anyhow!("payment unconfirmed; retry same event for reconciliation"))?
+            .map_err(anyhow::Error::new)?
             .into();
         ensure!(
             net >= r.price && net <= r.amount,
@@ -569,10 +605,10 @@ impl CashuWallet {
             .db
             .list_transactions(Some(r.mint.clone()), None, None)
             .await?;
-        if txs
-            .iter()
-            .any(|t| t.ys.iter().any(|y| r.input_ys.contains(&y.to_string())))
-        {
+        if txs.iter().any(|t| {
+            t.ys.iter().any(|y| r.input_ys.contains(&y.to_string()))
+                && !self.resolved_parent_transaction(r, t)
+        }) {
             return Ok(false);
         }
         let ys = proofs.ys()?;
@@ -652,6 +688,20 @@ impl CashuWallet {
         }
         if r.original.is_none() {
             return Ok(false);
+        }
+        if r.queued_at.is_some() {
+            // Accepted members are never collected standalone unless their
+            // immutable parent was durably resolved as a definitive failure.
+            let Some(parent) = &r.batch_id else {
+                return Ok(false);
+            };
+            let Some(batch) = self.load(parent).await? else {
+                return Ok(false);
+            };
+            if batch.failure.is_none() {
+                return Ok(false);
+            }
+            self.validate_batch(&batch).await?;
         }
         let original_proofs = self.original_proofs(&r).await?;
         self.claim_original(&r).await?;
@@ -829,3 +879,6 @@ mod fault_db;
 
 #[path = "cashu_recovery_transport.rs"]
 mod recovery_transport;
+
+#[path = "gas_batch.rs"]
+mod batch;
