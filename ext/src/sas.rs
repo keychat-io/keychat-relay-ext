@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 pub mod config;
 use config::Config;
 use config::Opts;
-use url::Url;
+mod media_urls;
+use media_urls::PublicMediaUrls;
 
 pub mod cashu;
 
@@ -221,44 +222,17 @@ async fn create_object(
     .map(|(k, v)| (k.to_owned(), v))
     .collect::<HashMap<_, _>>();
 
-    let q = [
-        // ("x-amz-acl".to_owned(), "public-read".to_owned()),
-    ]
-    .into_iter()
-    .collect::<HashMap<_, _>>();
-
-    use http::header::HeaderName;
-    use http::header::HeaderValue;
-    let custom_headers: http::HeaderMap = h
-        .iter()
-        .map(|(k, v)| {
-            (
-                HeaderName::try_from(k).expect("converted header name"),
-                HeaderValue::from_str(v).expect("converted header value"),
-            )
-        })
-        .collect();
-
-    // https://docs.aws.amazon.com/IAM/latest/UserGuide/create-signed-request.html
-    let url = state
-        .bucket
-        .presign_put(&key, 60 * 10, Some(custom_headers), Some(q))
+    let object = state
+        .public_media_urls
+        .presign_put(&state.bucket, &key, h)
         .await
-        .unwrap();
-
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload signing failed".into(),
+            )
+        })?;
     info!("{} {} {} upload authorized", key, js.length, sa);
-
-    let mut uri = Url::parse(&url).unwrap();
-    uri.set_query(None);
-
-    let object = ObjectForm {
-        url,
-        // url: format!("http://0.0.0.0:3001/v1/{key}"),
-        // url: format!("https://backup.keychat.io/api/v1/{key}"),
-        method: "PUT".into(),
-        access_url: uri.to_string(),
-        headers: h,
-    };
 
     Ok(Json(object))
 }
@@ -289,6 +263,7 @@ use std::sync::Arc;
 pub struct State {
     config: Config,
     bucket: Box<Bucket>,
+    public_media_urls: PublicMediaUrls,
     wallet: Arc<CashuWallet>,
     metrics: MetricsMpmc,
     limiter: LimiterState,
@@ -297,6 +272,7 @@ pub struct State {
 impl State {
     async fn new(config: Config) -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
+        let public_media_urls = PublicMediaUrls::from_env()?;
         let wallet = CashuWallet::new(&config, false).await?;
         let bucket = std::env::var("AWS_BUCKET").unwrap();
         let region = Region::from_env("AWS_REGION", "AWS_ENDPOINT_URL".into())?;
@@ -314,6 +290,7 @@ impl State {
         let this = Self {
             config,
             bucket,
+            public_media_urls,
             wallet,
             limiter: LimiterState::with_capacity(10000),
             metrics: flume::unbounded(),
@@ -368,6 +345,7 @@ mod tests {
             let state = Arc::new(State {
                 config,
                 bucket,
+                public_media_urls: PublicMediaUrls::default(),
                 wallet,
                 metrics: flume::unbounded(),
                 limiter: LimiterState::with_capacity(10),

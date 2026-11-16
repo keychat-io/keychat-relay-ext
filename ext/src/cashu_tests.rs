@@ -23,9 +23,11 @@ pub(crate) struct TestMint {
     keys: BTreeMap<Amount, SecretKey>,
     spent: Mutex<HashSet<String>>,
     outputs: Mutex<HashMap<String, (BlindedMessage, BlindSignature)>>,
-    swaps: AtomicUsize,
+    pub(super) swaps: AtomicUsize,
+    pub(crate) requests: AtomicUsize,
+    pub(crate) release_swap: tokio::sync::Notify,
     checks: AtomicUsize,
-    mode: AtomicU8, // 1: lose response; 2: reject; 3: empty restore after lost response
+    pub(crate) mode: AtomicU8, // 1: lose response; 2: reject; 3: empty restore after lost response
 }
 impl TestMint {
     fn new(unit: CurrencyUnit, fee: u64) -> Arc<Self> {
@@ -47,11 +49,13 @@ impl TestMint {
             spent: Mutex::new(HashSet::new()),
             outputs: Mutex::new(HashMap::new()),
             swaps: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
+            release_swap: tokio::sync::Notify::new(),
             checks: AtomicUsize::new(0),
             mode: AtomicU8::new(0),
         })
     }
-    fn proof(&self, amount: u64) -> Proof {
+    pub(crate) fn proof(&self, amount: u64) -> Proof {
         let secret = Secret::new(SecretKey::generate().to_secret_hex());
         let y = cdk::dhke::hash_to_curve(&secret.to_bytes()).unwrap();
         let c = cdk::dhke::sign_message(&self.keys[&Amount::from(amount)], &y).unwrap();
@@ -83,6 +87,10 @@ async fn swap(
     Json(req): Json<SwapRequest>,
 ) -> (StatusCode, Json<Value>) {
     let mode = m.mode.load(Ordering::SeqCst);
+    m.requests.fetch_add(1, Ordering::SeqCst);
+    if mode == 8 {
+        m.release_swap.notified().await;
+    }
     let mut spent = m.spent.lock().await;
     let ys = canonical_ys(req.inputs()).unwrap();
     if mode == 2 || mode == 4 || mode == 7 || ys.iter().any(|y| spent.contains(y)) {
@@ -221,6 +229,9 @@ pub(crate) async fn fixture(
         scope: "test-relay".into(),
         seed,
         _lock: File::create(dir.path().join("lock")).unwrap(),
+        registration: Mutex::new(batch::Registration::default()),
+        batch_wake: tokio::sync::Notify::new(),
+        input_limits: InputLimits::default(),
     });
     (service, mint, url, dir, server)
 }
@@ -391,7 +402,11 @@ fn ownership_prevents_old_db_second_process_and_changed_scope() {
     assert!(lock_database(p, "one").is_err());
 }
 
-async fn reopen(dir: &tempfile::TempDir, url: &MintUrl, unit: CurrencyUnit) -> Arc<CashuWallet> {
+pub(super) async fn reopen(
+    dir: &tempfile::TempDir,
+    url: &MintUrl,
+    unit: CurrencyUnit,
+) -> Arc<CashuWallet> {
     let db: Database = Arc::new(
         cdk_sqlite::WalletSqliteDatabase::new(dir.path().join("test.cdk018.sqlite"))
             .await
@@ -416,6 +431,9 @@ async fn reopen(dir: &tempfile::TempDir, url: &MintUrl, unit: CurrencyUnit) -> A
         scope: "test-relay".into(),
         seed,
         _lock: File::create(dir.path().join("lock")).unwrap(),
+        registration: Mutex::new(batch::Registration::default()),
+        batch_wake: tokio::sync::Notify::new(),
+        input_limits: InputLimits::default(),
     })
 }
 #[tokio::test]
@@ -478,6 +496,10 @@ async fn intent_without_cdk_operation_does_not_spend_a_replacement_ticket() {
         recovery_outputs: None,
         original: None,
         recovery_attempted: false,
+        queued_at: None,
+        batch_id: None,
+        members: None,
+        failure: None,
     };
     w.save(&r).await.unwrap();
     assert!(w
@@ -520,7 +542,7 @@ async fn request_timeout_reconciles_original_receive_without_replacement() {
     server.abort();
 }
 
-fn inject_database(
+pub(super) fn inject_database(
     w: &mut Arc<CashuWallet>,
     url: &MintUrl,
     unit: CurrencyUnit,

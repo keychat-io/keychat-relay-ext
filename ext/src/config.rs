@@ -54,6 +54,8 @@ pub struct Config {
     pub stamp: Option<Stamp>,
     #[serde(default)]
     pub input: InputLimits,
+    #[serde(default)]
+    pub batch: BatchConfig,
     pub limits: Limits,
     #[serde(default)]
     pub mints_file: Option<PathBuf>, // legacy config, no longer an allow-list fallback
@@ -106,6 +108,17 @@ impl Config {
         ensure!(
             self.input.max_amount <= i64::MAX as u64,
             "max_amount exceeds the SQLite integer range"
+        );
+        ensure!(
+            self.batch.size > 0
+                && self.batch.size <= 100
+                && self.batch.max_wait_seconds > 0
+                && self.batch.max_pending >= self.batch.size,
+            "invalid batch bounds"
+        );
+        ensure!(
+            self.batch.stamp_requests_per_minute > 0 && self.batch.stamp_burst > 0,
+            "invalid stamp HTTP rate budget"
         );
         if let Some(s) = &self.stamp {
             ensure!(s.unit == "stamp", "stamp.unit must be stamp");
@@ -328,5 +341,29 @@ mod tests {
         assert_eq!(c.compute_price(10485761).unwrap(), 2);
         assert_eq!(c.compute_price(104857600).unwrap(), 2);
         assert!(c.compute_price(104857601).is_err());
+    }
+}
+
+/// Gas-only. Omitted configuration preserves synchronous receipt admission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BatchConfig {
+    pub enabled: bool,
+    pub size: usize,
+    pub max_wait_seconds: u64,
+    pub max_pending: usize,
+    pub stamp_requests_per_minute: u32,
+    pub stamp_burst: u32,
+}
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            size: 10,
+            max_wait_seconds: 30,
+            max_pending: 100,
+            stamp_requests_per_minute: 120,
+            stamp_burst: 10,
+        }
     }
 }

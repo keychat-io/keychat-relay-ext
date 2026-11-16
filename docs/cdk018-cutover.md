@@ -35,13 +35,15 @@ Existing fee.unit/mints, size-price tables, top-level kinds and RPC field number
 retain their meanings. This is deliberately not an unchanged-config startup:
 old inline words, old database paths, gas allow_free=true and a missing fixed
 relay_scope are rejected. Supply the protected seed reference, a new database
-and relay_scope before a controlled cutover. allow_pending never permits an
-unconfirmed payment; a legacy mints_file cannot expand the allow-list.
+and relay_scope before a controlled cutover. allow_pending remains ignored;
+early admission requires explicit batch.enabled, independently of that legacy
+setting. A legacy mints_file cannot expand the allow-list.
 
 The gas gRPC envelope keeps tonic's existing 4 MiB limit; the token's separate
-byte/proof/amount limits still apply. Detached receive/status workers are bounded
-to 64 outstanding tasks, including timed-out waiters, and excess requests fail
-closed. The configured maximum token amount cannot exceed SQLite's signed
+byte/proof/amount limits still apply. Synchronous receive/status workers are
+bounded to 64 outstanding tasks, including timed-out waiters. Enabled batching
+uses one settlement worker and a bounded durable admission queue. Excess new
+requests fail closed. The configured maximum token amount cannot exceed SQLite's signed
 64-bit integer range. SAS does not log upload bodies, request headers or signed
 upload URLs.
 
@@ -76,6 +78,11 @@ therefore require the same protection as CDK's own proofs and saga tokens. Legac
 untrusted-mint transfer options do not add trusted mints or initiate transfers.
 
 ## Receive and recovery behavior
+
+The following synchronous receipt/collection rules remain the SAS behavior and
+the gas compatibility mode when batching is omitted or disabled. Gas's enabled
+batch mode preserves these recovery guards but admits before collection as
+described in [the batch design](gas-batch-admission.md).
 
 1. Validate the event ID and configured paid kind. Free kinds do not consume an
    attached token. Disabled gas denies paid kinds. allow_free is rejected by gas;
@@ -147,9 +154,12 @@ operator restore command. There are no automatic refunds, balance merges,
 outgoing payments or transaction pruning. Retain receipt history while event
 replay must remain safe; monitor database growth.
 
-A gas permit means payment was collected, not that relay message storage
-succeeded. Failure between those services remains a possible paid but unconfirmed
-publication. No cross-service atomic commit or refund is claimed.
+The gas template now enables durable early admission and background merged batch
+collection; see [gas batch admission](gas-batch-admission.md). Its permit means
+accepted/reserved, and can precede collection. With batching omitted/disabled,
+the synchronous rules above still require collected payment. Neither mode proves
+relay storage or provides a cross-service atomic commit or refund. Do not roll a
+database containing asynchronous batch records back to an older binary.
 
 ## Preserve old wallets; do not migrate in place
 
